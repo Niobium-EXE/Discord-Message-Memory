@@ -114,3 +114,178 @@ input:focus-visible + .switch { outline: 2px solid #aab3ff; outline-offset: 2px;
   .content { width: calc(100vw - 190px); padding: 30px 28px 60px; }
   .stats-grid { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* v1.2.0 - collapsible settings navigation */
+.sidebar { position: sticky; }
+.sidebar-toggle {
+  position: absolute;
+  z-index: 5;
+  top: 22px;
+  right: -13px;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #343a46;
+  border-radius: 8px;
+  background: #181c23;
+  color: #dce0e8;
+  cursor: pointer;
+  box-shadow: 0 5px 16px rgba(0,0,0,.24);
+}
+.sidebar-toggle:hover { background: #222732; border-color: #4a5260; }
+.sidebar-toggle span {
+  width: 7px;
+  height: 7px;
+  border-left: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg) translate(1px,-1px);
+  transition: transform 140ms ease;
+}
+.app-shell.sidebar-collapsed { grid-template-columns: 68px minmax(0, 1fr); }
+.app-shell.sidebar-collapsed .sidebar { padding-left: 12px; padding-right: 12px; }
+.app-shell.sidebar-collapsed .brand { justify-content: center; padding-left: 0; padding-right: 0; }
+.app-shell.sidebar-collapsed .brand > div:not(.brand-mark),
+.app-shell.sidebar-collapsed .sidebar nav,
+.app-shell.sidebar-collapsed .sidebar-note { display: none; }
+.app-shell.sidebar-collapsed .sidebar-toggle { right: -13px; }
+.app-shell.sidebar-collapsed .sidebar-toggle span { transform: rotate(225deg) translate(1px,-1px); }
+.app-shell.sidebar-collapsed .content { width: min(1040px, calc(100vw - 68px)); }
+
+/* Saved-chat actions */
+.chat-actions { display: flex; align-items: center; gap: 7px; }
+.export-button { min-width: 64px; }
+.primary-button {
+  border: 1px solid #6671ff;
+  border-radius: 7px;
+  padding: 8px 12px;
+  background: #5865f2;
+  color: #fff;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 800;
+}
+.primary-button:hover { background: #6874f7; }
+.primary-button:disabled { opacity: .5; cursor: default; }
+
+/* Built-in transcript exporter */
+.export-dialog {
+  width: min(560px, calc(100vw - 36px));
+  border: 1px solid #343a46;
+  border-radius: 14px;
+  padding: 0;
+  background: #15181f;
+  color: #edf0f4;
+  box-shadow: 0 28px 90px rgba(0,0,0,.58);
+}
+.export-dialog::backdrop { background: rgba(0,0,0,.68); }
+.export-dialog form { margin: 0; padding: 20px; }
+.export-dialog-heading { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; }
+.export-dialog-heading h3 { font-size: 17px; }
+.export-dialog-heading p { margin: 6px 0 0; color: #89919e; font-size: 11px; line-height: 1.5; }
+.icon-button {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #303641;
+  border-radius: 8px;
+  background: #1a1e25;
+  color: #9ca4b1;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+.icon-button:hover { background: #242933; color: #f2f4f7; }
+.export-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 18px; }
+.export-option {
+  position: relative;
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: 17px minmax(0,1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 10px;
+  border: 1px solid #292f38;
+  border-radius: 9px;
+  background: #11151b;
+  color: #dce0e7;
+  cursor: pointer;
+  font-size: 11px;
+}
+.export-option:hover { border-color: #3a424e; background: #151a21; }
+.export-option input { position: absolute; opacity: 0; pointer-events: none; }
+.export-check {
+  width: 16px;
+  height: 16px;
+  border: 1px solid #4a5260;
+  border-radius: 5px;
+  background: #0d1015;
+  position: relative;
+}
+.export-option input:checked + .export-check { border-color: #6773ff; background: #5865f2; }
+.export-option input:checked + .export-check::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 5px;
+  height: 9px;
+  border-right: 2px solid white;
+  border-bottom: 2px solid white;
+  transform: rotate(45deg);
+}
+.export-option input:focus-visible + .export-check { outline: 2px solid #9da5ff; outline-offset: 2px; }
+.advanced-option { grid-column: 1 / -1; }
+.advanced-label { margin-left: auto; color: #7d86ff; font-size: 8px; font-weight: 800; letter-spacing: .08em; }
+.info-tip {
+  position: relative;
+  width: 17px;
+  height: 17px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid #48505d;
+  border-radius: 50%;
+  color: #9ca4b1;
+  font-size: 9px;
+  font-weight: 800;
+  cursor: help;
+}
+.info-tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  z-index: 20;
+  right: -4px;
+  bottom: calc(100% + 8px);
+  width: 245px;
+  padding: 8px 9px;
+  border: 1px solid #3b424d;
+  border-radius: 8px;
+  background: #0d1015;
+  color: #d6dae1;
+  box-shadow: 0 10px 30px rgba(0,0,0,.45);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.45;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(3px);
+  transition: 100ms ease;
+}
+.info-tip:hover::after, .info-tip:focus::after { opacity: 1; visibility: visible; transform: translateY(0); }
+.export-progress { margin-top: 14px; padding: 10px 11px; border: 1px solid #2c323c; border-radius: 9px; background: #10141a; }
+.export-progress-row { display: flex; justify-content: space-between; gap: 12px; color: #9ca4b1; font-size: 10px; }
+.export-progress-track { height: 5px; margin-top: 8px; overflow: hidden; border-radius: 999px; background: #272d36; }
+#exportProgressBar { width: 0%; height: 100%; border-radius: inherit; background: #5865f2; transition: width 120ms ease; }
+.export-warning { margin-top: 12px; padding: 9px 10px; border: 1px solid rgba(240,178,50,.35); border-radius: 8px; background: rgba(240,178,50,.07); color: #d9b866; font-size: 10px; line-height: 1.45; }
+.export-actions { margin-top: 18px; }
+
+@media (max-width: 900px) {
+  .app-shell.sidebar-collapsed { grid-template-columns: 68px minmax(0, 1fr); }
+  .app-shell.sidebar-collapsed .content { width: calc(100vw - 68px); }
+  .export-options { grid-template-columns: 1fr; }
+  .advanced-option { grid-column: auto; }
+}

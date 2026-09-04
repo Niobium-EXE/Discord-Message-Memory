@@ -371,12 +371,19 @@
       } catch {}
     }
 
+    const parentId = safeGet(channel, "parent_id") || safeGet(channel, "parentId") || null;
+    const type = safeGet(channel, "type") ?? null;
+    const numericType = Number(type);
+    const isThread = numericType === 10 || numericType === 11 || numericType === 12;
+
     return {
       channelId,
       guildId,
       channelName,
       guildName: safeGet(guild, "name") || null,
-      channelType: safeGet(channel, "type") ?? null,
+      channelType: type,
+      parentId: parentId ? String(parentId) : null,
+      isThread,
       scope: classifyChannel(channel, guildId)
     };
   }
@@ -408,6 +415,7 @@
     const typeRaw = safeGet(message, "type");
     const pinnedRaw = safeGet(message, "pinned");
     const ttsRaw = safeGet(message, "tts");
+    const threadRaw = safeGet(message, "thread");
 
     const record = {
       id: String(id),
@@ -427,6 +435,7 @@
       reactions: plain(reactionsRaw) || [],
       referencedMessage: plain(referencedRaw) || null,
       messageReference: plain(messageReferenceRaw) || null,
+      thread: plain(threadRaw) || null,
       flags: flagsRaw ?? 0,
       type: typeRaw ?? 0,
       pinned: Boolean(pinnedRaw),
@@ -450,6 +459,7 @@
       if (reactionsRaw === undefined) delete record.reactions;
       if (referencedRaw === undefined) delete record.referencedMessage;
       if (messageReferenceRaw === undefined) delete record.messageReference;
+      if (threadRaw === undefined) delete record.thread;
       if (flagsRaw === undefined) delete record.flags;
       if (typeRaw === undefined) delete record.type;
       if (pinnedRaw === undefined) delete record.pinned;

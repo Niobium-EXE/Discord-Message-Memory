@@ -3,7 +3,8 @@ const DB_VERSION = 1;
 const DEFAULT_SETTINGS = {
   rememberingEnabled: true,
   showingEnabled: true,
-  quickCss: ""
+  quickCss: "",
+  sidebarCollapsed: false
 };
 
 let dbPromise;
@@ -129,6 +130,8 @@ async function upsertChannelMeta(record) {
     channelName: meta.channelName || old?.channelName || null,
     guildName: meta.guildName || old?.guildName || null,
     channelType: meta.channelType ?? old?.channelType ?? null,
+    parentId: meta.parentId || old?.parentId || null,
+    isThread: meta.isThread ?? old?.isThread ?? false,
     scope: meta.scope || record.channelScope || old?.scope || (record.guildId ? "server" : "private"),
     lastSeenAt: Date.now()
   });

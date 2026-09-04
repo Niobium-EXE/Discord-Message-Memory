@@ -9,9 +9,10 @@
 <body>
   <div class="app-shell">
     <aside class="sidebar">
+      <button id="sidebarToggle" class="sidebar-toggle" type="button" aria-label="Collapse settings sidebar" title="Collapse sidebar"><span aria-hidden="true"></span></button>
       <div class="brand">
         <div class="brand-mark">DM</div>
-        <div>
+        <div class="brand-copy">
           <strong>Message Memory</strong>
           <span>Extension settings</span>
         </div>
@@ -67,7 +68,7 @@
           <div>
             <span class="eyebrow">STORAGE</span>
             <h2>Saved chats</h2>
-            <p>Delete one chat's memory or erase everything the extension has stored.</p>
+            <p>Export a saved chat, delete one chat's memory, or erase everything the extension has stored.</p>
           </div>
           <button id="deleteAll" class="danger-button" type="button">Delete all saved data</button>
         </div>
@@ -104,6 +105,70 @@
       </section>
     </main>
   </div>
+
+  <dialog id="exportDialog" class="export-dialog">
+    <form id="exportForm" method="dialog">
+      <div class="export-dialog-heading">
+        <div>
+          <span class="eyebrow">EXPORT</span>
+          <h3 id="exportTitle">Export saved chat</h3>
+          <p id="exportSubtitle">Create a standalone HTML transcript from Message Memory's saved copy.</p>
+        </div>
+        <button id="exportClose" class="icon-button" value="cancel" type="submit" aria-label="Close export settings">×</button>
+      </div>
+
+      <div class="export-options">
+        <label class="export-option">
+          <input id="exportDeleted" type="checkbox" checked>
+          <span class="export-check"></span>
+          <span>Deleted messages</span>
+          <span class="info-tip" tabindex="0" data-tip="Include messages Message Memory saw before they were deleted. Deleted rows are styled red in the export.">i</span>
+        </label>
+        <label class="export-option">
+          <input id="exportEdits" type="checkbox" checked>
+          <span class="export-check"></span>
+          <span>Edit history</span>
+          <span class="info-tip" tabindex="0" data-tip="Include saved previous versions of edited messages. Edited rows and prior versions are styled yellow.">i</span>
+        </label>
+        <label class="export-option">
+          <input id="exportImages" type="checkbox" checked>
+          <span class="export-check"></span>
+          <span>Embed images</span>
+          <span class="info-tip" tabindex="0" data-tip="Put cached image attachments directly inside the HTML file when Message Memory has the file saved.">i</span>
+        </label>
+        <label class="export-option">
+          <input id="exportMedia" type="checkbox" checked>
+          <span class="export-check"></span>
+          <span>Embed video & audio</span>
+          <span class="info-tip" tabindex="0" data-tip="Put cached videos, audio, and voice-message files directly inside the HTML file. Large media can make the export very large.">i</span>
+        </label>
+        <label class="export-option">
+          <input id="exportFiles" type="checkbox">
+          <span class="export-check"></span>
+          <span>Embed other files</span>
+          <span class="info-tip" tabindex="0" data-tip="Embed other cached attachment types as downloadable data inside the HTML instead of linking back to Discord's CDN.">i</span>
+        </label>
+        <label class="export-option advanced-option">
+          <input id="exportThreads" type="checkbox">
+          <span class="export-check"></span>
+          <span>Saved threads</span>
+          <span class="advanced-label">ADVANCED</span>
+          <span class="info-tip" tabindex="0" data-tip="Include saved child threads when Message Memory knows their parent channel. Thread buttons in the transcript open a side panel, matching the previous exporter behavior.">i</span>
+        </label>
+      </div>
+
+      <div id="exportProgress" class="export-progress" hidden>
+        <div class="export-progress-row"><span id="exportProgressText">Preparing export…</span><span id="exportProgressPercent"></span></div>
+        <div class="export-progress-track"><div id="exportProgressBar"></div></div>
+      </div>
+      <div id="exportWarning" class="export-warning" hidden></div>
+
+      <div class="dialog-actions export-actions">
+        <button value="cancel" class="secondary-button" type="submit">Cancel</button>
+        <button id="startExport" class="primary-button" type="button">Export HTML</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="confirmDialog" class="confirm-dialog">
     <form method="dialog">
