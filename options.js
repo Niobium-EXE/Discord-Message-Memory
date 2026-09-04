@@ -98,10 +98,43 @@ async function loadStats() {
   document.getElementById("mediaBytes").textContent = formatBytes(stats.mediaBytes);
 }
 
+function uniqueNames(values) {
+  const out = [];
+  for (const value of values || []) {
+    const name = String(value || "").trim();
+    if (!name) continue;
+    if (!out.some(existing => existing.toLowerCase() === name.toLowerCase())) out.push(name);
+  }
+  return out;
+}
+
+function dmParticipantNames(chat) {
+  const storedRecipients = Array.isArray(chat.recipientNames) ? chat.recipientNames : [];
+  const savedAuthors = Array.isArray(chat.authorNames) ? chat.authorNames : [];
+  const channelNames = chat.channelName ? String(chat.channelName).split(",").map(name => name.trim()) : [];
+
+  if (chat.selfName) {
+    const others = uniqueNames([...storedRecipients, ...channelNames, ...savedAuthors])
+      .filter(name => name.toLowerCase() !== String(chat.selfName).toLowerCase());
+    return uniqueNames([chat.selfName, ...others]);
+  }
+
+  // Older saved data did not include UserStore/current-user metadata. In that
+  // case keep the existing DM title first, then fill in the other account from
+  // the authors already stored in this chat. This upgrades old chats without
+  // requiring the user to delete/re-record them.
+  return uniqueNames([...channelNames, ...savedAuthors, ...storedRecipients]);
+}
+
 function displayChatName(chat) {
+  if (chat.scope === "dm" || Number(chat.channelType) === 1) {
+    const participants = dmParticipantNames(chat);
+    if (participants.length >= 2) return participants.slice(0, 2).join(" - ");
+    if (participants.length === 1) return participants[0];
+    return `Direct Message ${chat.channelId}`;
+  }
   if (chat.channelName && chat.guildName) return `${chat.guildName} / ${chat.channelName}`;
   if (chat.channelName) return chat.channelName;
-  if (chat.scope === "dm") return `Direct Message ${chat.channelId}`;
   if (chat.scope === "group_dm") return `Group DM ${chat.channelId}`;
   if (chat.scope === "private") return `DM / Group DM ${chat.channelId}`;
   return `Channel ${chat.channelId}`;
@@ -119,7 +152,7 @@ function displayChatKind(chat) {
 function renderChats() {
   const query = chatSearch.value.trim().toLowerCase();
   const filtered = chats.filter(chat => {
-    const haystack = [chat.channelName, chat.guildName, chat.channelId, chat.guildId].filter(Boolean).join(" ").toLowerCase();
+    const haystack = [chat.channelName, chat.guildName, chat.channelId, chat.guildId, chat.selfName, ...(chat.recipientNames || []), ...(chat.authorNames || [])].filter(Boolean).join(" ").toLowerCase();
     return !query || haystack.includes(query);
   });
 
@@ -376,6 +409,24 @@ function exportAuthorName(record) {
   return record?.author?.globalName || record?.author?.global_name || record?.author?.username || "Unknown user";
 }
 
+function exportAuthorAvatarUrl(author) {
+  if (!author || typeof author !== "object") return "";
+  const direct = safeUrl(author.avatarUrl || author.avatarURL || author.avatar_url || "");
+  if (direct) return direct;
+  const id = String(author.id || "").trim();
+  const avatar = String(author.avatar || "").trim();
+  if (!id || !avatar) return "";
+  const ext = avatar.startsWith("a_") ? "gif" : "png";
+  return `https://cdn.discordapp.com/avatars/${encodeURIComponent(id)}/${encodeURIComponent(avatar)}.${ext}?size=96`;
+}
+
+function attachmentDurationSecs(attachment) {
+  const raw = attachment?.durationSecs ?? attachment?.duration_secs ?? attachment?.duration;
+  if (raw === null || raw === undefined || raw === "") return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
 function formatExportTime(value, fallbackSnowflake) {
   let date = value ? new Date(value) : null;
   if ((!date || Number.isNaN(date.getTime())) && fallbackSnowflake) {
@@ -464,7 +515,10 @@ function renderAttachments(record, mediaMap) {
       return `<div class="attachment media-attachment"><video controls preload="metadata" src="${escapeHtml(src)}"></video><div>${escapeHtml(filename)}${size ? ` · ${escapeHtml(size)}` : ""}${linkedBadge}</div></div>`;
     }
     if (kind === "audio" && src) {
-      return `<div class="attachment audio-attachment"><div class="file-name">${escapeHtml(filename)}${size ? ` · ${escapeHtml(size)}` : ""}${linkedBadge}</div><audio controls preload="metadata" src="${escapeHtml(src)}"></audio></div>`;
+      const duration = attachmentDurationSecs(attachment);
+      const shortKnown = duration !== null && duration < 2;
+      const durationAttr = duration !== null ? ` data-saved-duration="${escapeHtml(duration)}"` : "";
+      return `<div class="attachment audio-attachment"${durationAttr}><div class="file-name">${escapeHtml(filename)}${size ? ` · ${escapeHtml(size)}` : ""}${linkedBadge}</div><audio controls preload="metadata" src="${escapeHtml(src)}"></audio><a class="audio-download" ${shortKnown ? "" : "hidden "}download="${escapeHtml(filename)}" href="">Download audio</a></div>`;
     }
     if (src) {
       return `<a class="attachment file-attachment" href="${escapeHtml(src)}" ${embedded ? `download="${escapeHtml(filename)}"` : 'target="_blank" rel="noreferrer"'}><span class="file-icon">FILE</span><span><strong>${escapeHtml(filename)}</strong><small>${escapeHtml(size || "Attachment")}${linkedBadge}</small></span></a>`;
@@ -482,20 +536,25 @@ function renderThreadButton(record, threadMap) {
   return `<button class="thread-button" type="button" data-thread-open="${escapeHtml(threadId)}"><span>Thread</span>${escapeHtml(name)}<b>${formatNumber(thread.messages.length)}</b></button>`;
 }
 
-function renderMessage(record, options, mediaMap, threadMap = new Map()) {
+function renderMessage(record, options, mediaMap, threadMap = new Map(), avatarMap = new Map()) {
   if (record.deleted && !options.deleted) return "";
   const edited = Array.isArray(record.editHistory) && record.editHistory.length;
   const editedVisible = Boolean(options.edits && edited);
   const classes = ["message", record.deleted ? "deleted" : "", editedVisible ? "edited" : ""].filter(Boolean).join(" ");
   const author = exportAuthorName(record);
   const initials = author.split(/\s+/).map(part => part[0]).join("").slice(0, 2).toUpperCase() || "?";
+  const avatarUrl = exportAuthorAvatarUrl(record.author);
+  const avatarSrc = avatarMap.get(avatarUrl) || avatarUrl;
+  const avatarHtml = avatarSrc
+    ? `<div class="avatar avatar-has-image"><span>${escapeHtml(initials)}</span><img src="${escapeHtml(avatarSrc)}" alt="${escapeHtml(author)} profile picture" loading="lazy" onerror="this.remove()"></div>`
+    : `<div class="avatar"><span>${escapeHtml(initials)}</span></div>`;
   const status = `${record.deleted ? '<span class="status deleted-status">DELETED</span>' : ""}${editedVisible ? '<span class="status edited-status">EDITED</span>' : ""}`;
   const bodyText = record.content ? linkifyText(record.content) : "";
   const emptyNotice = !record.content && !record.attachments?.length && !record.embeds?.length ? '<span class="empty-message">[empty or unavailable message]</span>' : "";
   const embeds = Array.isArray(record.embeds) ? record.embeds.map(renderEmbed).join("") : "";
   const stickers = Array.isArray(record.stickers) && record.stickers.length ? `<div class="stickers">${record.stickers.map(sticker => `<span>Sticker: ${escapeHtml(sticker?.name || sticker?.id || "sticker")}</span>`).join("")}</div>` : "";
   return `<article class="${classes}" id="message-${escapeHtml(record.id)}">
-    <div class="avatar">${escapeHtml(initials)}</div>
+    ${avatarHtml}
     <div class="message-main">
       <div class="message-header"><strong>${escapeHtml(author)}</strong><time>${escapeHtml(formatExportTime(record.timestamp, record.id))}</time><div class="statuses">${status}</div></div>
       ${renderReply(record)}
@@ -511,10 +570,10 @@ function renderMessage(record, options, mediaMap, threadMap = new Map()) {
   </article>`;
 }
 
-function renderThreadPanels(threads, options, mediaMap) {
+function renderThreadPanels(threads, options, mediaMap, avatarMap) {
   if (!threads.length) return "";
   return threads.map(thread => {
-    const body = thread.messages.map(record => renderMessage(record, options, mediaMap, new Map())).join("") || '<div class="thread-empty">No saved messages in this thread.</div>';
+    const body = thread.messages.map(record => renderMessage(record, options, mediaMap, new Map(), avatarMap)).join("") || '<div class="thread-empty">No saved messages in this thread.</div>';
     return `<section class="thread-panel" data-thread-panel="${escapeHtml(thread.meta.channelId)}" hidden>
       <div class="thread-panel-title"><span>THREAD</span><strong>${escapeHtml(thread.meta.channelName || `Thread ${thread.meta.channelId}`)}</strong><small>${formatNumber(thread.messages.length)} saved messages</small></div>
       <div class="thread-messages">${body}</div>
@@ -524,15 +583,15 @@ function renderThreadPanels(threads, options, mediaMap) {
 
 function exportDocumentCss() {
   return `
-:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0b0d10;color:#dbdee1}*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:#0b0d10;color:#dbdee1}body{overflow-x:hidden}a{color:#00a8fc;text-decoration:none}a:hover{text-decoration:underline}.topbar{position:sticky;top:0;z-index:20;display:flex;justify-content:space-between;gap:24px;align-items:center;padding:18px 24px;border-bottom:1px solid #23262d;background:rgba(11,13,16,.94);backdrop-filter:blur(16px)}.topbar h1{margin:0;color:#f2f3f5;font-size:18px}.topbar p{margin:4px 0 0;color:#8a919b;font-size:11px}.export-meta{color:#7e8590;font-size:10px;text-align:right}.layout{max-width:1050px;margin:0 auto;padding:18px 20px 70px}.thread-index{display:flex;flex-wrap:wrap;gap:7px;margin:0 0 14px;padding:12px;border:1px solid #262a31;border-radius:9px;background:#111318}.thread-index button,.thread-button{border:1px solid #343943;border-radius:7px;background:#1a1d23;color:#d8dbe0;cursor:pointer}.thread-index button{padding:7px 9px;font-size:10px}.message{position:relative;display:grid;grid-template-columns:42px minmax(0,1fr);gap:10px;margin:2px 0;padding:8px 12px;border:1px solid transparent;border-radius:8px}.message:hover{background:#111318}.message.deleted{border-color:rgba(242,63,67,.72);background:linear-gradient(90deg,rgba(242,63,67,.08),rgba(242,63,67,.025))}.message.edited:not(.deleted){border-color:rgba(240,178,50,.7);background:linear-gradient(90deg,rgba(240,178,50,.075),rgba(240,178,50,.02))}.avatar{width:40px;height:40px;display:grid;place-items:center;border-radius:50%;background:#262b33;color:#f2f3f5;font-size:12px;font-weight:800}.message-main{min-width:0}.message-header{display:flex;align-items:baseline;gap:8px;min-height:20px}.message-header strong{color:#f2f3f5;font-size:14px}.message-header time{color:#777e88;font-size:10px}.statuses{display:flex;gap:4px;margin-left:auto}.status{display:inline-flex;padding:1px 5px;border:1px solid;border-radius:999px;font-size:8px;font-weight:800;letter-spacing:.05em}.deleted-status{border-color:rgba(242,63,67,.7);color:#ff6b70;background:rgba(242,63,67,.1)}.edited-status{border-color:rgba(240,178,50,.75);color:#f0b232;background:rgba(240,178,50,.09)}.message-content{font-size:14px;line-height:1.4;overflow-wrap:anywhere}.empty-message{color:#6f7680;font-style:italic}.reply{margin:0 0 4px;padding-left:9px;border-left:2px solid #4e545e;color:#8c939d;font-size:11px}.reply span{margin-right:6px;color:#b5bac1;font-weight:700}.edit-history{display:grid;gap:5px;margin:4px 0 6px}.edit-version{width:fit-content;max-width:100%;min-width:180px;padding:5px 9px;border:1px solid rgba(240,178,50,.28);border-left-width:2px;border-radius:6px;background:rgba(240,178,50,.035)}.edit-version-content{font-size:13px;line-height:1.35}.edit-version-time{margin-top:2px;color:#8d8b78;font-size:9px}.attachments{display:grid;gap:7px;margin-top:7px}.attachment{max-width:min(640px,100%)}.image-attachment{margin:0}.image-attachment img{display:block;max-width:100%;max-height:520px;border-radius:8px;border:1px solid #282c33;background:#08090b}.image-attachment figcaption,.media-attachment>div{margin-top:4px;color:#8c939d;font-size:10px}.media-attachment video{display:block;max-width:100%;max-height:520px;border-radius:8px;background:#050607}.audio-attachment{padding:8px 10px;border:1px solid #2d323a;border-radius:8px;background:#15181d}.audio-attachment audio{width:min(480px,100%);margin-top:6px}.file-attachment{display:flex;align-items:center;gap:10px;width:fit-content;min-width:260px;padding:9px 10px;border:1px solid #30353e;border-radius:8px;background:#171a20}.file-attachment:hover{text-decoration:none;background:#1c2027}.file-icon{display:grid;place-items:center;width:34px;height:38px;border-radius:5px;background:#5865f2;color:#fff;font-size:8px;font-weight:900}.file-attachment strong{display:block;color:#00a8fc;font-size:11px}.file-attachment small{display:block;margin-top:2px;color:#858c96;font-size:9px}.attachment-source{display:inline-block;margin-left:6px;color:#68707b;font-size:8px}.unavailable{opacity:.62}.embed{max-width:540px;margin-top:7px;padding:9px 11px;border-left:4px solid #4f545c;border-radius:4px;background:#17191e}.embed-title{font-size:13px;font-weight:700}.embed-description{margin-top:4px;font-size:12px;line-height:1.45}.embed-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:7px}.embed-field{font-size:10px}.embed-field strong{display:block;margin-bottom:2px}.embed-image{display:block;max-width:100%;max-height:360px;margin-top:8px;border-radius:5px}.poll{width:fit-content;max-width:500px;margin-top:7px;padding:9px 11px;border:1px solid #30353e;border-radius:8px;background:#15181d;font-size:11px}.poll ul{margin:5px 0 0;padding-left:18px}.reactions{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}.reaction{padding:2px 7px;border:1px solid #30353e;border-radius:999px;background:#191c21;font-size:10px}.stickers{margin-top:6px;color:#a8adb5;font-size:10px}.thread-button{display:flex;align-items:center;gap:7px;width:fit-content;margin-top:7px;padding:6px 8px;font-size:10px}.thread-button span{color:#858c96;font-size:8px;font-weight:800}.thread-button b{margin-left:4px;color:#848b95}.thread-drawer{position:fixed;z-index:50;top:0;right:0;width:min(620px,92vw);height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr);border-left:1px solid #343840;background:#0e1014;box-shadow:-24px 0 70px rgba(0,0,0,.45);transform:translateX(105%);transition:transform 160ms ease}.thread-drawer.open{transform:translateX(0)}.thread-drawer-header{display:flex;justify-content:space-between;align-items:center;padding:13px 15px;border-bottom:1px solid #262a31;background:#13161b}.thread-drawer-header strong{font-size:12px}.thread-close{width:30px;height:30px;border:1px solid #353a43;border-radius:7px;background:#1b1e24;color:#c9cdd3;cursor:pointer}.thread-drawer-body{overflow:auto;padding:10px}.thread-panel-title{padding:8px 10px 12px;border-bottom:1px solid #252930}.thread-panel-title span{display:block;color:#7d86ff;font-size:8px;font-weight:900;letter-spacing:.1em}.thread-panel-title strong{display:block;margin-top:3px;font-size:15px}.thread-panel-title small{display:block;margin-top:3px;color:#7c838d;font-size:9px}.thread-empty{padding:30px;text-align:center;color:#777e88}.thread-backdrop{position:fixed;z-index:49;inset:0;background:rgba(0,0,0,.45);opacity:0;visibility:hidden;transition:120ms ease}.thread-backdrop.open{opacity:1;visibility:visible}@media(max-width:700px){.topbar{align-items:flex-start;padding:14px 15px}.export-meta{display:none}.layout{padding:12px 8px 50px}.message{grid-template-columns:34px minmax(0,1fr);padding:8px}.avatar{width:32px;height:32px}.embed-fields{grid-template-columns:1fr}.statuses{position:absolute;right:8px;top:7px}.message-header{padding-right:60px}}
+:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0b0d10;color:#dbdee1}*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:#0b0d10;color:#dbdee1}body{overflow-x:hidden}a{color:#00a8fc;text-decoration:none}a:hover{text-decoration:underline}.topbar{position:sticky;top:0;z-index:20;display:flex;justify-content:space-between;gap:24px;align-items:center;padding:18px 24px;border-bottom:1px solid #23262d;background:rgba(11,13,16,.94);backdrop-filter:blur(16px)}.topbar h1{margin:0;color:#f2f3f5;font-size:18px}.topbar p{margin:4px 0 0;color:#8a919b;font-size:11px}.export-meta{color:#7e8590;font-size:10px;text-align:right}.layout{max-width:1050px;margin:0 auto;padding:18px 20px 70px}.thread-index{display:flex;flex-wrap:wrap;gap:7px;margin:0 0 14px;padding:12px;border:1px solid #262a31;border-radius:9px;background:#111318}.thread-index button,.thread-button{border:1px solid #343943;border-radius:7px;background:#1a1d23;color:#d8dbe0;cursor:pointer}.thread-index button{padding:7px 9px;font-size:10px}.message{position:relative;display:grid;grid-template-columns:42px minmax(0,1fr);gap:10px;margin:2px 0;padding:8px 12px;border:1px solid transparent;border-radius:8px}.message:hover{background:#111318}.message.deleted{border-color:rgba(242,63,67,.72);background:linear-gradient(90deg,rgba(242,63,67,.08),rgba(242,63,67,.025))}.message.edited:not(.deleted){border-color:rgba(240,178,50,.7);background:linear-gradient(90deg,rgba(240,178,50,.075),rgba(240,178,50,.02))}.avatar{position:relative;width:40px;height:40px;display:grid;place-items:center;overflow:hidden;border-radius:50%;background:#262b33;color:#f2f3f5;font-size:12px;font-weight:800}.avatar span{position:relative;z-index:0}.avatar img{position:absolute;z-index:1;inset:0;width:100%;height:100%;object-fit:cover;border-radius:inherit}.message-main{min-width:0}.message-header{display:flex;align-items:baseline;gap:8px;min-height:20px}.message-header strong{color:#f2f3f5;font-size:14px}.message-header time{color:#777e88;font-size:10px}.statuses{display:flex;gap:4px;margin-left:auto}.status{display:inline-flex;padding:1px 5px;border:1px solid;border-radius:999px;font-size:8px;font-weight:800;letter-spacing:.05em}.deleted-status{border-color:rgba(242,63,67,.7);color:#ff6b70;background:rgba(242,63,67,.1)}.edited-status{border-color:rgba(240,178,50,.75);color:#f0b232;background:rgba(240,178,50,.09)}.message-content{font-size:14px;line-height:1.4;overflow-wrap:anywhere}.empty-message{color:#6f7680;font-style:italic}.reply{margin:0 0 4px;padding-left:9px;border-left:2px solid #4e545e;color:#8c939d;font-size:11px}.reply span{margin-right:6px;color:#b5bac1;font-weight:700}.edit-history{display:grid;gap:5px;margin:4px 0 6px}.edit-version{width:fit-content;max-width:100%;min-width:180px;padding:5px 9px;border:1px solid rgba(240,178,50,.28);border-left-width:2px;border-radius:6px;background:rgba(240,178,50,.035)}.edit-version-content{font-size:13px;line-height:1.35}.edit-version-time{margin-top:2px;color:#8d8b78;font-size:9px}.attachments{display:grid;gap:7px;margin-top:7px}.attachment{max-width:min(640px,100%)}.image-attachment{margin:0}.image-attachment img{display:block;max-width:100%;max-height:520px;border-radius:8px;border:1px solid #282c33;background:#08090b}.image-attachment figcaption,.media-attachment>div{margin-top:4px;color:#8c939d;font-size:10px}.media-attachment video{display:block;max-width:100%;max-height:520px;border-radius:8px;background:#050607}.audio-attachment{padding:8px 10px;border:1px solid #2d323a;border-radius:8px;background:#15181d}.audio-attachment audio{display:block;width:min(480px,100%);margin-top:6px}.audio-download{display:inline-block;margin-top:5px;font-size:10px;font-weight:650}.audio-download[hidden]{display:none!important}.file-attachment{display:flex;align-items:center;gap:10px;width:fit-content;min-width:260px;padding:9px 10px;border:1px solid #30353e;border-radius:8px;background:#171a20}.file-attachment:hover{text-decoration:none;background:#1c2027}.file-icon{display:grid;place-items:center;width:34px;height:38px;border-radius:5px;background:#5865f2;color:#fff;font-size:8px;font-weight:900}.file-attachment strong{display:block;color:#00a8fc;font-size:11px}.file-attachment small{display:block;margin-top:2px;color:#858c96;font-size:9px}.attachment-source{display:inline-block;margin-left:6px;color:#68707b;font-size:8px}.unavailable{opacity:.62}.embed{max-width:540px;margin-top:7px;padding:9px 11px;border-left:4px solid #4f545c;border-radius:4px;background:#17191e}.embed-title{font-size:13px;font-weight:700}.embed-description{margin-top:4px;font-size:12px;line-height:1.45}.embed-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:7px}.embed-field{font-size:10px}.embed-field strong{display:block;margin-bottom:2px}.embed-image{display:block;max-width:100%;max-height:360px;margin-top:8px;border-radius:5px}.poll{width:fit-content;max-width:500px;margin-top:7px;padding:9px 11px;border:1px solid #30353e;border-radius:8px;background:#15181d;font-size:11px}.poll ul{margin:5px 0 0;padding-left:18px}.reactions{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}.reaction{padding:2px 7px;border:1px solid #30353e;border-radius:999px;background:#191c21;font-size:10px}.stickers{margin-top:6px;color:#a8adb5;font-size:10px}.thread-button{display:flex;align-items:center;gap:7px;width:fit-content;margin-top:7px;padding:6px 8px;font-size:10px}.thread-button span{color:#858c96;font-size:8px;font-weight:800}.thread-button b{margin-left:4px;color:#848b95}.thread-drawer{position:fixed;z-index:50;top:0;right:0;width:min(620px,92vw);height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr);border-left:1px solid #343840;background:#0e1014;box-shadow:-24px 0 70px rgba(0,0,0,.45);transform:translateX(105%);transition:transform 160ms ease}.thread-drawer.open{transform:translateX(0)}.thread-drawer-header{display:flex;justify-content:space-between;align-items:center;padding:13px 15px;border-bottom:1px solid #262a31;background:#13161b}.thread-drawer-header strong{font-size:12px}.thread-close{width:30px;height:30px;border:1px solid #353a43;border-radius:7px;background:#1b1e24;color:#c9cdd3;cursor:pointer}.thread-drawer-body{overflow:auto;padding:10px}.thread-panel-title{padding:8px 10px 12px;border-bottom:1px solid #252930}.thread-panel-title span{display:block;color:#7d86ff;font-size:8px;font-weight:900;letter-spacing:.1em}.thread-panel-title strong{display:block;margin-top:3px;font-size:15px}.thread-panel-title small{display:block;margin-top:3px;color:#7c838d;font-size:9px}.thread-empty{padding:30px;text-align:center;color:#777e88}.thread-backdrop{position:fixed;z-index:49;inset:0;background:rgba(0,0,0,.45);opacity:0;visibility:hidden;transition:120ms ease}.thread-backdrop.open{opacity:1;visibility:visible}@media(max-width:700px){.topbar{align-items:flex-start;padding:14px 15px}.export-meta{display:none}.layout{padding:12px 8px 50px}.message{grid-template-columns:34px minmax(0,1fr);padding:8px}.avatar{width:32px;height:32px}.embed-fields{grid-template-columns:1fr}.statuses{position:absolute;right:8px;top:7px}.message-header{padding-right:60px}}
 `;
 }
 
-function renderExportHtml(chat, messages, threads, options, mediaMap) {
+function renderExportHtml(chat, messages, threads, options, mediaMap, avatarMap) {
   const threadMap = new Map(threads.map(thread => [String(thread.meta.channelId), thread]));
-  const messageHtml = messages.map(record => renderMessage(record, options, mediaMap, threadMap)).join("");
+  const messageHtml = messages.map(record => renderMessage(record, options, mediaMap, threadMap, avatarMap)).join("");
   const threadsIndex = threads.length ? `<div class="thread-index"><strong>Saved threads:</strong>${threads.map(thread => `<button type="button" data-thread-open="${escapeHtml(thread.meta.channelId)}">${escapeHtml(thread.meta.channelName || `Thread ${thread.meta.channelId}`)} · ${formatNumber(thread.messages.length)}</button>`).join("")}</div>` : "";
-  const threadPanels = renderThreadPanels(threads, options, mediaMap);
+  const threadPanels = renderThreadPanels(threads, options, mediaMap, avatarMap);
   const title = displayChatName(chat);
   const exportedAt = formatExportTime(new Date().toISOString());
   return `<!doctype html>
@@ -541,6 +600,7 @@ function renderExportHtml(chat, messages, threads, options, mediaMap) {
 <header class="topbar"><div><h1>${escapeHtml(title)}</h1><p>${escapeHtml(displayChatKind(chat))} · Channel ID ${escapeHtml(chat.channelId)}</p></div><div class="export-meta">${formatNumber(messages.length)} saved messages<br>Exported ${escapeHtml(exportedAt)} by Discord Message Memory</div></header>
 <main class="layout">${threadsIndex}<div class="messages">${messageHtml || '<div class="thread-empty">No saved messages matched the export options.</div>'}</div></main>
 ${threads.length ? `<div id="threadBackdrop" class="thread-backdrop"></div><aside id="threadDrawer" class="thread-drawer" aria-hidden="true"><div class="thread-drawer-header"><strong>Thread</strong><button id="threadClose" class="thread-close" type="button">×</button></div><div class="thread-drawer-body">${threadPanels}</div></aside>` : ""}
+<script>(function(){document.querySelectorAll('.audio-attachment').forEach(function(box){const audio=box.querySelector('audio');const link=box.querySelector('.audio-download');if(!audio||!link)return;function sync(){const src=audio.currentSrc||audio.src||'';if(src)link.href=src;const saved=Number(box.getAttribute('data-saved-duration'));const savedValid=box.hasAttribute('data-saved-duration')&&Number.isFinite(saved);const actual=Number(audio.duration);const actualValid=Number.isFinite(actual);const duration=actualValid?actual:(savedValid?saved:null);if(duration!==null)link.hidden=!(duration<2);}sync();audio.addEventListener('loadedmetadata',sync,{once:true});link.addEventListener('click',async function(event){const src=audio.currentSrc||audio.src||link.href||'';if(!/^https?:/i.test(src))return;event.preventDefault();try{const response=await fetch(src);if(!response.ok)throw new Error('download failed');const blob=await response.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=link.getAttribute('download')||'audio';document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(url);},30000);}catch{const a=document.createElement('a');a.href=src;a.target='_blank';a.rel='noreferrer';document.body.appendChild(a);a.click();a.remove();}});});})();</script>
 <script>(function(){const drawer=document.getElementById('threadDrawer');if(!drawer)return;const backdrop=document.getElementById('threadBackdrop');const close=document.getElementById('threadClose');function shut(){drawer.classList.remove('open');backdrop.classList.remove('open');drawer.setAttribute('aria-hidden','true');}function open(id){document.querySelectorAll('[data-thread-panel]').forEach(p=>p.hidden=p.getAttribute('data-thread-panel')!==id);drawer.classList.add('open');backdrop.classList.add('open');drawer.setAttribute('aria-hidden','false');}document.addEventListener('click',e=>{const b=e.target.closest('[data-thread-open]');if(b)open(b.getAttribute('data-thread-open'));});close.addEventListener('click',shut);backdrop.addEventListener('click',shut);document.addEventListener('keydown',e=>{if(e.key==='Escape')shut();});})();</script>
 </body></html>`;
 }
@@ -598,6 +658,37 @@ async function collectEmbeddedMedia(allMessageGroups, options) {
   return { mediaMap, missing };
 }
 
+async function collectEmbeddedAvatars(allMessageGroups) {
+  const urls = [];
+  const seen = new Set();
+  for (const messages of allMessageGroups) {
+    for (const message of messages) {
+      const url = exportAuthorAvatarUrl(message?.author);
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      urls.push(url);
+    }
+  }
+
+  const avatarMap = new Map();
+  if (!urls.length) return avatarMap;
+  let done = 0;
+  setExportProgress(0, urls.length, `Embedding profile pictures (0/${urls.length})…`);
+  for (const url of urls) {
+    try {
+      const response = await fetch(url, { credentials: "omit", cache: "force-cache" });
+      if (response.ok) {
+        const blob = await response.blob();
+        const dataUrl = await blobToDataUrl(blob);
+        if (dataUrl) avatarMap.set(url, dataUrl);
+      }
+    } catch {}
+    done += 1;
+    setExportProgress(done, urls.length, `Embedding profile pictures (${done}/${urls.length})…`);
+  }
+  return avatarMap;
+}
+
 async function runExport() {
   if (!currentExportChat || exportRunning) return;
   exportRunning = true;
@@ -612,9 +703,10 @@ async function runExport() {
     const threads = await collectThreadExports(currentExportChat, options);
     const groups = [messages, ...threads.map(thread => thread.messages)];
     const { mediaMap, missing } = await collectEmbeddedMedia(groups, options);
+    const avatarMap = await collectEmbeddedAvatars(groups);
 
     setExportProgress(1, 1, "Building standalone HTML…");
-    const html = renderExportHtml(currentExportChat, messages, threads, options, mediaMap);
+    const html = renderExportHtml(currentExportChat, messages, threads, options, mediaMap, avatarMap);
     const blob = new Blob([html], { type: "text/html;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");

@@ -140,6 +140,11 @@
     const contentNode = clean.querySelector(`[id^="message-content-${ids.id}"]`) || clean.querySelector('[id^="message-content-"]');
     const authorNode = clean.querySelector(`[id^="message-username-${ids.id}"]`) || clean.querySelector('[id^="message-username-"]') || clean.querySelector("h3 span");
     const timeNode = clean.querySelector("time[datetime]");
+    // The Flux message normally gives us the author's id + avatar hash. Keep a DOM
+    // avatar URL as a fallback so exports can still show profile pictures if a
+    // Discord build only exposes the rendered row to us.
+    const avatarNode = element.querySelector('img[class*="avatar"], img[src*="cdn.discordapp.com/avatars/"], img[src*="media.discordapp.net/avatars/"]');
+    const avatarUrl = avatarNode?.currentSrc || avatarNode?.src || null;
     const attachments = [];
     const seen = new Set();
 
@@ -149,13 +154,22 @@
       seen.add(url);
       let filename = "attachment";
       try { filename = decodeURIComponent(new URL(url).pathname.split("/").pop() || filename); } catch {}
+      let durationSecs = null;
+      try {
+        if (node instanceof HTMLMediaElement && Number.isFinite(node.duration) && node.duration >= 0) durationSecs = node.duration;
+        if (durationSecs == null) {
+          const media = element.querySelector(`audio[src="${CSS.escape(url)}"], video[src="${CSS.escape(url)}"]`);
+          if (media instanceof HTMLMediaElement && Number.isFinite(media.duration) && media.duration >= 0) durationSecs = media.duration;
+        }
+      } catch {}
       attachments.push({
         id: null,
         filename,
         url,
         proxyUrl: null,
         contentType: guessContentType(filename),
-        size: 0
+        size: 0,
+        durationSecs
       });
     });
 
@@ -170,7 +184,7 @@
       },
       id: ids.id,
       content: contentNode?.innerText || contentNode?.textContent || "",
-      author: authorNode ? { username: authorNode.textContent?.trim() || "Unknown user" } : null,
+      author: authorNode ? { username: authorNode.textContent?.trim() || "Unknown user", avatarUrl } : (avatarUrl ? { username: "Unknown user", avatarUrl } : null),
       timestamp: timeNode?.getAttribute("datetime") || null,
       attachments,
       snapshotHtml: sanitizeSnapshot(element)

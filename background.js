@@ -95,6 +95,20 @@ function shallowDefinedMerge(base, incoming) {
   return out;
 }
 
+function mergeAuthorData(existing, incoming) {
+  if (!existing) return incoming || null;
+  if (!incoming) return existing;
+  const merged = { ...existing };
+  for (const [key, value] of Object.entries(incoming)) {
+    // DOM snapshots are mainly an enrichment fallback. Do not replace good Flux
+    // author values with null/empty values, but do fill fields such as avatarUrl.
+    if ((merged[key] === undefined || merged[key] === null || merged[key] === "") && value !== undefined && value !== null && value !== "") {
+      merged[key] = value;
+    }
+  }
+  return merged;
+}
+
 function normalizeAttachmentKeys(record) {
   const attachments = Array.isArray(record.attachments) ? record.attachments : [];
   return attachments.map((attachment, index) => ({
@@ -129,6 +143,10 @@ async function upsertChannelMeta(record) {
     guildId: record.guildId || meta.guildId || old?.guildId || null,
     channelName: meta.channelName || old?.channelName || null,
     guildName: meta.guildName || old?.guildName || null,
+    selfName: meta.selfName || old?.selfName || null,
+    selfUserId: meta.selfUserId || old?.selfUserId || null,
+    recipientNames: Array.isArray(meta.recipientNames) && meta.recipientNames.length ? meta.recipientNames : (old?.recipientNames || []),
+    recipientIds: Array.isArray(meta.recipientIds) && meta.recipientIds.length ? meta.recipientIds : (old?.recipientIds || []),
     channelType: meta.channelType ?? old?.channelType ?? null,
     parentId: meta.parentId || old?.parentId || null,
     isThread: meta.isThread ?? old?.isThread ?? false,
@@ -205,7 +223,7 @@ async function saveSnapshot(payload) {
     channelId: payload.channelId,
     id: payload.id,
     content: old?.content ?? payload.content ?? "",
-    author: old?.author || payload.author || null,
+    author: mergeAuthorData(old?.author, payload.author),
     timestamp: old?.timestamp || payload.timestamp || null,
     firstSeenAt: old?.firstSeenAt || Date.now(),
     lastSeenAt: Date.now(),
@@ -415,7 +433,9 @@ async function listChats() {
         editedCount: 0,
         mediaCount: 0,
         mediaBytes: 0,
-        lastSeenAt: 0
+        lastSeenAt: 0,
+        authorNames: [],
+        authorIds: []
       });
     }
     const agg = aggregates.get(record.channelId);
@@ -423,6 +443,11 @@ async function listChats() {
     if (record.deleted) agg.deletedCount += 1;
     if (record.editHistory?.length) agg.editedCount += 1;
     agg.lastSeenAt = Math.max(agg.lastSeenAt, record.lastSeenAt || record.firstSeenAt || 0);
+    const author = record.author || {};
+    const authorName = author.globalName || author.global_name || author.username || null;
+    const authorId = author.id != null ? String(author.id) : null;
+    if (authorName && !agg.authorNames.includes(authorName)) agg.authorNames.push(authorName);
+    if (authorId && !agg.authorIds.includes(authorId)) agg.authorIds.push(authorId);
   }
 
   for (const item of media) {

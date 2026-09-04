@@ -18,6 +18,7 @@
   let messageStore = null;
   let channelStore = null;
   let guildStore = null;
+  let userStore = null;
   let subscribed = false;
   let dispatchPatched = false;
   let lastHookEventAt = 0;
@@ -264,6 +265,12 @@
       guildStore = findStoreByName("GuildStore") || findModule(m => typeof safeGet(m, "getGuild") === "function" && typeof safeGet(m, "getGuilds") === "function");
     }
 
+    if (!userStore) {
+      userStore = findStoreByName("UserStore") || findModule(m =>
+        typeof safeGet(m, "getCurrentUser") === "function" && typeof safeGet(m, "getUser") === "function"
+      );
+    }
+
     return Boolean(dispatcher);
   }
 
@@ -360,16 +367,39 @@
     let guild = null;
     try { guild = guildId ? guildStore?.getGuild?.(guildId) : null; } catch {}
 
+    let currentUser = null;
+    try { currentUser = userStore?.getCurrentUser?.() || null; } catch {}
+    const currentUserId = safeGet(currentUser, "id") ? String(safeGet(currentUser, "id")) : null;
+    const selfName = safeGet(currentUser, "globalName") || safeGet(currentUser, "global_name") || safeGet(currentUser, "username") || null;
+
+    const recipientNames = [];
+    const recipientIds = [];
+    const addRecipient = value => {
+      if (value == null) return;
+      let user = value;
+      if (typeof value === "string" || typeof value === "number") {
+        const id = String(value);
+        try { user = userStore?.getUser?.(id) || { id }; } catch { user = { id }; }
+      }
+      const idRaw = safeGet(user, "id");
+      const id = idRaw != null ? String(idRaw) : null;
+      if (id && currentUserId && id === currentUserId) return;
+      const name = safeGet(user, "globalName") || safeGet(user, "global_name") || safeGet(user, "username") || null;
+      if (id && !recipientIds.includes(id)) recipientIds.push(id);
+      if (name && !recipientNames.includes(name)) recipientNames.push(name);
+    };
+
+    try {
+      const recipients = safeGet(channel, "rawRecipients") || safeGet(channel, "recipients");
+      if (Array.isArray(recipients)) recipients.forEach(addRecipient);
+      else if (recipients && typeof recipients[Symbol.iterator] === "function") {
+        for (const recipient of recipients) addRecipient(recipient);
+      }
+      addRecipient(safeGet(channel, "recipientId") || safeGet(channel, "recipient_id"));
+    } catch {}
+
     let channelName = safeGet(channel, "name") || null;
-    if (!channelName) {
-      try {
-        const recipients = safeGet(channel, "rawRecipients") || safeGet(channel, "recipients");
-        if (Array.isArray(recipients)) {
-          const names = recipients.map(user => safeGet(user, "globalName") || safeGet(user, "global_name") || safeGet(user, "username")).filter(Boolean);
-          if (names.length) channelName = names.join(", ");
-        }
-      } catch {}
-    }
+    if (!channelName && recipientNames.length) channelName = recipientNames.join(", ");
 
     const parentId = safeGet(channel, "parent_id") || safeGet(channel, "parentId") || null;
     const type = safeGet(channel, "type") ?? null;
@@ -381,6 +411,10 @@
       guildId,
       channelName,
       guildName: safeGet(guild, "name") || null,
+      selfName,
+      selfUserId: currentUserId,
+      recipientNames,
+      recipientIds,
       channelType: type,
       parentId: parentId ? String(parentId) : null,
       isThread,
