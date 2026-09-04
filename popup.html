@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Discord Message Memory</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="panel">
+    <header class="header">
+      <div>
+        <h1>Message Memory</h1>
+        <p>Servers, DMs, and group DMs stay local to this browser.</p>
+      </div>
+      <span id="statusDot" class="status-dot" title="Discord hook status"></span>
+    </header>
+
+    <section class="controls">
+      <label class="setting-row">
+        <span>
+          <strong>Remember messages</strong>
+          <small>Save messages, edits, deletions, and attachments.</small>
+        </span>
+        <input id="rememberingEnabled" type="checkbox">
+        <span class="switch" aria-hidden="true"></span>
+      </label>
+
+      <label class="setting-row">
+        <span>
+          <strong>Show remembered history</strong>
+          <small>Restore deleted messages and show saved edit history.</small>
+        </span>
+        <input id="showingEnabled" type="checkbox">
+        <span class="switch" aria-hidden="true"></span>
+      </label>
+    </section>
+
+    <div id="statusText" class="status-text">Checking Discord connection…</div>
+    <button id="openSettings" class="settings-button" type="button">Open extension settings</button>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

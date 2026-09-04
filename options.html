@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Discord Message Memory Settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">DM</div>
+        <div>
+          <strong>Message Memory</strong>
+          <span>Extension settings</span>
+        </div>
+      </div>
+      <nav>
+        <a href="#general">General</a>
+        <a href="#saved-data">Saved data</a>
+        <a href="#quickcss">Live CSS</a>
+      </nav>
+      <div class="sidebar-note">All saved Discord data stays in this extension's local browser storage.</div>
+    </aside>
+
+    <main class="content">
+      <section id="general" class="section">
+        <div class="section-heading">
+          <div>
+            <span class="eyebrow">GENERAL</span>
+            <h1>Discord Message Memory</h1>
+            <p>Control capture and whether remembered history is drawn back into Discord.</p>
+          </div>
+          <div id="hookPill" class="hook-pill">Discord hook unknown</div>
+        </div>
+
+        <div class="card settings-card">
+          <label class="toggle-row">
+            <div>
+              <strong>Remember messages</strong>
+              <p>Save messages, edits, deletions, embeds, and attachment files from server channels, DMs, and group DMs while Discord is running.</p>
+            </div>
+            <input id="rememberingEnabled" type="checkbox">
+            <span class="switch"></span>
+          </label>
+          <label class="toggle-row">
+            <div>
+              <strong>Show remembered history</strong>
+              <p>Restore deleted rows and show previous edit versions directly in the chat.</p>
+            </div>
+            <input id="showingEnabled" type="checkbox">
+            <span class="switch"></span>
+          </label>
+        </div>
+
+        <div id="statsGrid" class="stats-grid">
+          <div class="stat-card"><span>Messages</span><strong id="messageCount">—</strong></div>
+          <div class="stat-card"><span>Chats</span><strong id="channelCount">—</strong></div>
+          <div class="stat-card"><span>Cached files</span><strong id="mediaCount">—</strong></div>
+          <div class="stat-card"><span>Attachment storage</span><strong id="mediaBytes">—</strong></div>
+        </div>
+      </section>
+
+      <section id="saved-data" class="section">
+        <div class="section-heading compact">
+          <div>
+            <span class="eyebrow">STORAGE</span>
+            <h2>Saved chats</h2>
+            <p>Delete one chat's memory or erase everything the extension has stored.</p>
+          </div>
+          <button id="deleteAll" class="danger-button" type="button">Delete all saved data</button>
+        </div>
+
+        <div class="card saved-card">
+          <div class="saved-toolbar">
+            <input id="chatSearch" type="search" placeholder="Search by chat, server, or channel ID">
+            <button id="refreshChats" class="secondary-button" type="button">Refresh</button>
+          </div>
+          <div id="chatList" class="chat-list">
+            <div class="empty-state">Loading saved chats…</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="quickcss" class="section">
+        <div class="section-heading compact">
+          <div>
+            <span class="eyebrow">QUICKCSS</span>
+            <h2>Live CSS</h2>
+            <p>CSS saves automatically and updates every open Discord tab immediately, like a QuickCSS editor.</p>
+          </div>
+          <button id="resetCss" class="secondary-button" type="button">Clear CSS</button>
+        </div>
+
+        <div class="editor-card">
+          <div class="editor-topbar">
+            <span>quick.css</span>
+            <span id="cssStatus">Saved</span>
+          </div>
+          <textarea id="quickCss" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="/* Example */\n.messagelogger-deleted {\n  border-radius: 12px !important;\n}"></textarea>
+          <div class="editor-footer">Tab inserts two spaces. Ctrl+S saves immediately. Changes also auto-save while you type.</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="confirmDialog" class="confirm-dialog">
+    <form method="dialog">
+      <h3 id="confirmTitle">Confirm deletion</h3>
+      <p id="confirmBody"></p>
+      <div class="dialog-actions">
+        <button value="cancel" class="secondary-button">Cancel</button>
+        <button id="confirmButton" value="confirm" class="danger-button">Delete</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="options.js"></script>
+</body>
+</html>

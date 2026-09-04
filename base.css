@@ -1,0 +1,388 @@
+/* Discord Message Memory - page styling */
+
+/*
+ * Paint-only message outlines. They do not change Discord's message geometry,
+ * which keeps compact mode and the virtualized scroller stable.
+ */
+li.messagelogger-deleted,
+li.dmh-message-edited {
+  position: relative !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  isolation: isolate !important;
+}
+
+/* Deleted messages stay red. */
+li.messagelogger-deleted::before {
+  content: "" !important;
+  position: absolute !important;
+  z-index: 0 !important;
+  inset: 1px 8px !important;
+  border: 1px solid rgba(242, 63, 67, 0.62) !important;
+  border-left-width: 3px !important;
+  border-radius: 7px !important;
+  background: linear-gradient(90deg, rgba(242, 63, 67, 0.105), rgba(242, 63, 67, 0.035) 55%, transparent 100%) !important;
+  box-shadow: 0 0 0 1px rgba(242, 63, 67, 0.035) !important;
+  pointer-events: none !important;
+}
+
+/* Edited messages are yellow. If a message is both edited and deleted, the
+ * deleted (red) state owns the outer message outline while EDITED stays yellow.
+ */
+li.dmh-message-edited:not(.messagelogger-deleted)::before {
+  content: "" !important;
+  position: absolute !important;
+  z-index: 0 !important;
+  inset: 1px 8px !important;
+  border: 1px solid rgba(240, 178, 50, 0.72) !important;
+  border-left-width: 3px !important;
+  border-radius: 7px !important;
+  background: linear-gradient(90deg, rgba(240, 178, 50, 0.12), rgba(240, 178, 50, 0.04) 58%, transparent 100%) !important;
+  box-shadow: 0 0 0 1px rgba(240, 178, 50, 0.04) !important;
+  pointer-events: none !important;
+}
+
+/* Put Discord's real row content above the paint-only overlays. */
+li.messagelogger-deleted > *,
+li.dmh-message-edited > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Vencord also suppresses the normal hover action buttons for logged deletes. */
+.messagelogger-deleted [class*="buttons"] {
+  display: none !important;
+}
+
+.dmh-deleted-badge {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  box-sizing: border-box !important;
+  min-height: 14px !important;
+  margin-left: 7px !important;
+  padding: 0 5px !important;
+  border: 1px solid rgba(242, 63, 67, 0.62) !important;
+  border-radius: 999px !important;
+  background: rgba(242, 63, 67, 0.12) !important;
+  color: var(--status-danger, #f04747) !important;
+  font-family: var(--font-primary, Arial, sans-serif) !important;
+  font-size: 9px !important;
+  font-weight: 700 !important;
+  line-height: 12px !important;
+  letter-spacing: 0.055em !important;
+  vertical-align: 1px !important;
+  white-space: nowrap !important;
+  user-select: none !important;
+}
+
+/* For attachment-only messages where there is no content node to append to. */
+.dmh-deleted-badge-floating {
+  position: absolute !important;
+  z-index: 3 !important;
+  top: 5px !important;
+  right: 14px !important;
+  margin-left: 0 !important;
+  pointer-events: none !important;
+}
+
+/* Edit history stays inside the same Discord message row. Keep it visually
+ * connected to the current message, but align the saved revisions to Discord's
+ * actual message-content column so compact mode does not produce long stray
+ * vertical lines or full-width bands. */
+.dmh-edit-history-wrap {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: flex-start !important;
+  justify-content: flex-start !important;
+  align-self: flex-start !important;
+  justify-self: stretch !important;
+  box-sizing: border-box !important;
+  width: auto !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  height: auto !important;
+  min-height: 0 !important;
+  margin: 4px 0 6px 0 !important;
+  padding: 0 !important;
+  gap: 4px !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--text-normal, #dbdee1) !important;
+  overflow: visible !important;
+}
+
+.messagelogger-edited.dmh-edit-entry {
+  position: relative !important;
+  display: inline-flex !important;
+  flex-direction: column !important;
+  align-items: stretch !important;
+  justify-content: flex-start !important;
+  align-self: flex-start !important;
+  box-sizing: border-box !important;
+  width: fit-content !important;
+  max-width: min(100%, 720px) !important;
+  min-width: 180px !important;
+  height: auto !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 5px 10px 6px 10px !important;
+  border: 1px solid rgba(240, 178, 50, 0.2) !important;
+  border-left-width: 2px !important;
+  border-radius: 6px !important;
+  background: rgba(240, 178, 50, 0.032) !important;
+  box-shadow: none !important;
+  color: var(--text-normal, #dbdee1) !important;
+  white-space: normal !important;
+  word-break: break-word !important;
+  overflow: hidden !important;
+  contain: layout paint !important;
+  transform: none !important;
+  inset: auto !important;
+  text-indent: 0 !important;
+}
+
+/* Some Vencord/QuickCSS themes style .messagelogger-edited descendants as if
+ * they were Discord message markup. Keep our saved revision text physically
+ * inside its own inset box regardless of those external rules. */
+.messagelogger-edited.dmh-edit-entry > .dmh-edit-content,
+.messagelogger-edited.dmh-edit-entry > .dmh-edit-history-time {
+  float: none !important;
+  clear: none !important;
+  left: auto !important;
+  right: auto !important;
+  top: auto !important;
+  bottom: auto !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  translate: none !important;
+}
+
+/* Neutralize external/Vencord-like theme pseudo-elements attached to the
+ * compatibility classes. Message Memory draws one shared EDITED badge itself. */
+.messagelogger-edited.dmh-edit-entry::before,
+.messagelogger-edited.dmh-edit-entry::after,
+.messagelogger-edit-marker.dmh-edit-marker::before,
+.messagelogger-edit-marker.dmh-edit-marker::after {
+  content: none !important;
+  display: none !important;
+}
+
+.dmh-edit-content {
+  position: static !important;
+  display: block !important;
+  box-sizing: border-box !important;
+  width: auto !important;
+  max-width: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  color: var(--text-normal, #dbdee1) !important;
+  font: inherit !important;
+  line-height: 1.3rem !important;
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere !important;
+  text-indent: 0 !important;
+  transform: none !important;
+  inset: auto !important;
+}
+
+.dmh-edit-history-time {
+  position: static !important;
+  display: block !important;
+  box-sizing: border-box !important;
+  width: auto !important;
+  max-width: 100% !important;
+  margin: 2px 0 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  color: var(--text-muted, #949ba4) !important;
+  font-family: var(--font-primary, Arial, sans-serif) !important;
+  font-size: 0.68rem !important;
+  font-weight: 400 !important;
+  line-height: 0.9rem !important;
+  white-space: nowrap !important;
+  opacity: 0.9 !important;
+  text-indent: 0 !important;
+  transform: none !important;
+  inset: auto !important;
+}
+
+.messagelogger-edit-marker.dmh-edit-marker {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  box-sizing: border-box !important;
+  min-height: 14px !important;
+  padding: 0 5px !important;
+  border: 1px solid rgba(240, 178, 50, 0.74) !important;
+  border-radius: 999px !important;
+  background: rgba(240, 178, 50, 0.14) !important;
+  color: #f0b232 !important;
+  font-family: var(--font-primary, Arial, sans-serif) !important;
+  font-size: 9px !important;
+  font-weight: 700 !important;
+  line-height: 12px !important;
+  letter-spacing: 0.055em !important;
+  white-space: nowrap !important;
+  user-select: none !important;
+  pointer-events: none !important;
+  cursor: default !important;
+}
+
+.dmh-edited-badge-floating {
+  position: absolute !important;
+  z-index: 3 !important;
+  top: 5px !important;
+  right: 14px !important;
+  margin: 0 !important;
+}
+
+/* If a message was edited and later deleted, show both badges without overlap. */
+li.messagelogger-deleted .dmh-edited-badge-floating {
+  right: 78px !important;
+}
+
+.messagelogger-deleted-attachment {
+  border-color: rgba(242, 63, 67, 0.48) !important;
+}
+
+.dmh-synthetic-message {
+  display: grid !important;
+  grid-template-columns: 44px minmax(0, 1fr) !important;
+  column-gap: 12px !important;
+  list-style: none !important;
+  margin: 2px 8px !important;
+  padding: 8px 12px 8px 14px !important;
+  min-height: 48px !important;
+  color: var(--text-normal, #dbdee1) !important;
+  font-family: var(--font-primary, Arial, sans-serif) !important;
+  box-sizing: border-box !important;
+}
+
+.dmh-avatar {
+  width: 40px !important;
+  height: 40px !important;
+  border-radius: 50% !important;
+  background: var(--background-modifier-accent, rgba(255, 255, 255, 0.08)) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  overflow: hidden !important;
+  color: var(--header-primary, #f2f3f5) !important;
+  font-weight: 700 !important;
+  user-select: none !important;
+}
+
+.dmh-avatar img {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+}
+
+.dmh-message-body {
+  min-width: 0 !important;
+}
+
+.dmh-message-header {
+  display: flex !important;
+  align-items: baseline !important;
+  flex-wrap: wrap !important;
+  gap: 0 !important;
+  margin: 0 0 2px !important;
+  padding: 0 !important;
+  font-size: 1rem !important;
+  line-height: 1.375rem !important;
+}
+
+.dmh-author {
+  color: var(--header-primary, #f2f3f5) !important;
+  font-weight: 500 !important;
+}
+
+.dmh-time {
+  margin-left: 7px !important;
+  color: var(--text-muted, #949ba4) !important;
+  font-size: 0.75rem !important;
+  font-weight: 400 !important;
+}
+
+.dmh-message-content {
+  color: var(--text-normal, #dbdee1) !important;
+  line-height: 1.375rem !important;
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere !important;
+}
+
+.dmh-attachments {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: flex-start !important;
+  gap: 8px !important;
+  margin-top: 6px !important;
+}
+
+.dmh-attachment {
+  max-width: min(520px, 100%) !important;
+  padding: 6px !important;
+  border: 1px solid rgba(242, 63, 67, 0.35) !important;
+  border-radius: 8px !important;
+  background: rgba(0, 0, 0, 0.14) !important;
+  box-sizing: border-box !important;
+}
+
+.dmh-restored-image,
+.dmh-restored-video {
+  display: block !important;
+  max-width: min(480px, 100%) !important;
+  max-height: 420px !important;
+  border-radius: 6px !important;
+  object-fit: contain !important;
+}
+
+.dmh-restored-audio {
+  width: min(440px, 100%) !important;
+}
+
+.dmh-file-link {
+  display: block !important;
+  margin-top: 5px !important;
+  color: var(--text-link, #00a8fc) !important;
+  font-size: 0.86rem !important;
+  text-decoration: none !important;
+  overflow-wrap: anywhere !important;
+}
+
+.dmh-file-link:hover {
+  text-decoration: underline !important;
+}
+
+.dmh-embed,
+.dmh-poll,
+.dmh-stickers {
+  max-width: 520px !important;
+  margin-top: 7px !important;
+  padding: 8px 10px !important;
+  border-left: 3px solid rgba(242, 63, 67, 0.55) !important;
+  border-radius: 4px !important;
+  background: var(--background-secondary, rgba(0, 0, 0, 0.18)) !important;
+  color: var(--text-normal, #dbdee1) !important;
+  font-size: 0.9rem !important;
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere !important;
+}
+
+.dmh-embed-title {
+  margin-bottom: 3px !important;
+  color: var(--header-primary, #f2f3f5) !important;
+  font-weight: 600 !important;
+}
+
+.dmh-embed a {
+  color: var(--text-link, #00a8fc) !important;
+}
