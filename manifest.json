@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Discord Message Memory",
   "short_name": "Message Memory",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Locally remembers Discord messages, edits, deletions, and attachments and restores them in chat.",
   "minimum_chrome_version": "111",
   "permissions": [

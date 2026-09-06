@@ -335,6 +335,15 @@ function importTimestamp(value) {
   return Number.isFinite(time) ? time : 0;
 }
 
+function normalizeImportText(value) {
+  return String(value ?? "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/\u00a0/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function importAttachmentSignature(attachments) {
   return JSON.stringify((Array.isArray(attachments) ? attachments : []).map(item => ({
     id: item?.id || null,
@@ -345,10 +354,22 @@ function importAttachmentSignature(attachments) {
 }
 
 function importHistorySignature(item) {
-  return `${String(item?.content || "")}\n${importAttachmentSignature(item?.attachments)}`;
+  return `${normalizeImportText(item?.content || "")}\n${importAttachmentSignature(item?.attachments)}`;
+}
+
+function chooseBetterImportedRevision(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const aScore = normalizeImportText(a.content).length + ((Array.isArray(a.attachments) ? a.attachments.length : 0) * 500);
+  const bScore = normalizeImportText(b.content).length + ((Array.isArray(b.attachments) ? b.attachments.length : 0) * 500);
+  if (bScore !== aScore) return bScore > aScore ? b : a;
+  const aTime = importTimestamp(a.editedAt) || Number(a.capturedAt || 0);
+  const bTime = importTimestamp(b.editedAt) || Number(b.capturedAt || 0);
+  return bTime >= aTime ? b : a;
 }
 
 function mergeImportHistories(...groups) {
+  const byExactEditTime = new Map();
   const bySignature = new Map();
   for (const group of groups) {
     for (const item of Array.isArray(group) ? group : []) {
@@ -358,14 +379,22 @@ function mergeImportHistories(...groups) {
         editedAt: item?.editedAt || null,
         capturedAt: Number(item?.capturedAt || 0) || Date.now()
       };
-      const signature = importHistorySignature(normalized);
-      const previous = bySignature.get(signature);
-      if (!previous || importTimestamp(normalized.editedAt) < importTimestamp(previous.editedAt) || !previous.editedAt) {
-        bySignature.set(signature, normalized);
+      const exactTime = importTimestamp(normalized.editedAt);
+      if (exactTime) {
+        byExactEditTime.set(exactTime, chooseBetterImportedRevision(byExactEditTime.get(exactTime), normalized));
+        continue;
       }
+      const signature = importHistorySignature(normalized);
+      bySignature.set(signature, chooseBetterImportedRevision(bySignature.get(signature), normalized));
     }
   }
-  return [...bySignature.values()].sort((a, b) => {
+  const merged = [...byExactEditTime.values(), ...bySignature.values()];
+  const unique = new Map();
+  for (const item of merged) {
+    const key = importTimestamp(item.editedAt) ? `t:${importTimestamp(item.editedAt)}` : `s:${importHistorySignature(item)}`;
+    unique.set(key, chooseBetterImportedRevision(unique.get(key), item));
+  }
+  return [...unique.values()].sort((a, b) => {
     const aa = importTimestamp(a.editedAt) || Number(a.capturedAt || 0);
     const bb = importTimestamp(b.editedAt) || Number(b.capturedAt || 0);
     return aa - bb;
@@ -417,18 +446,27 @@ function mergeImportedRecord(existing, incomingRaw) {
   const otherCurrent = incomingIsNewerImportedCopy ? existing : incoming;
   let history = mergeImportHistories(existing.editHistory, incoming.editHistory);
 
-  const existingContent = String(existing.content ?? "");
-  const incomingContent = String(incoming.content ?? "");
+  const existingContent = normalizeImportText(existing.content ?? "");
+  const incomingContent = normalizeImportText(incoming.content ?? "");
   const existingAttachments = Array.isArray(existing.attachments) ? existing.attachments : [];
   const incomingAttachments = Array.isArray(incoming.attachments) ? incoming.attachments : [];
-  if (existingContent !== incomingContent || importAttachmentSignature(existingAttachments) !== importAttachmentSignature(incomingAttachments)) {
-    const historical = {
-      content: otherCurrent.content ?? "",
-      attachments: Array.isArray(otherCurrent.attachments) ? otherCurrent.attachments : [],
-      editedAt: chosenCurrent.importExportedAt || incoming.importExportedAt || existing.importExportedAt || null,
-      capturedAt: importTimestamp(otherCurrent.importExportedAt) || Number(otherCurrent.lastSeenAt || 0) || Date.now()
-    };
-    history = mergeImportHistories(history, [historical]);
+  const sameSnapshot = existingExportTime && incomingExportTime && existingExportTime === incomingExportTime;
+  const hasExplicitEditEvidence = Boolean(
+    (Array.isArray(existing.editHistory) && existing.editHistory.length) ||
+    (Array.isArray(incoming.editHistory) && incoming.editHistory.length) ||
+    existing.editedTimestamp || incoming.editedTimestamp
+  );
+  if (!sameSnapshot && (existingContent !== incomingContent || importAttachmentSignature(existingAttachments) !== importAttachmentSignature(incomingAttachments))) {
+    const shouldSynthesizeHistorical = hasExplicitEditEvidence || (existingImportedOnly && incoming.importedOnly === true);
+    if (shouldSynthesizeHistorical) {
+      const historical = {
+        content: otherCurrent.content ?? "",
+        attachments: Array.isArray(otherCurrent.attachments) ? otherCurrent.attachments : [],
+        editedAt: chosenCurrent.importExportedAt || incoming.importExportedAt || existing.importExportedAt || null,
+        capturedAt: importTimestamp(otherCurrent.importExportedAt) || Number(otherCurrent.lastSeenAt || 0) || Date.now()
+      };
+      history = mergeImportHistories(history, [historical]);
+    }
   }
 
   const merged = { ...incoming, ...existing, ...chosenCurrent };
@@ -438,7 +476,8 @@ function mergeImportedRecord(existing, incomingRaw) {
   merged.author = mergeImportAuthor(existing.author, incoming.author);
   merged.deleted = Boolean(existing.deleted || incoming.deleted);
   merged.deletedAt = existing.deletedAt || incoming.deletedAt || null;
-  merged.editHistory = history.filter(item => importHistorySignature(item) !== importHistorySignature({ content: merged.content || "", attachments: merged.attachments || [] }));
+  const currentSignature = importHistorySignature({ content: merged.content || "", attachments: merged.attachments || [] });
+  merged.editHistory = history.filter(item => importHistorySignature(item) !== currentSignature);
   merged.firstSeenAt = Math.min(...[existing.firstSeenAt, incoming.firstSeenAt].map(Number).filter(Number.isFinite).filter(value => value > 0), Date.now());
   merged.lastSeenAt = Math.max(Number(existing.lastSeenAt || 0), Number(incoming.lastSeenAt || 0), Date.now());
   merged.importedOnly = existingImportedOnly;

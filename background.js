@@ -22,19 +22,22 @@ const ACTION_ICONS = {
   }
 };
 
-async function setRememberingActionIcon(enabled) {
+async function setHookActionIcon(status = null) {
   try {
-    await chrome.action.setIcon({ path: enabled ? ACTION_ICONS.on : ACTION_ICONS.off });
-    await chrome.action.setTitle({
-      title: enabled ? "Discord Message Memory — Remembering on" : "Discord Message Memory — Remembering off"
-    });
+    const fresh = status?.updatedAt && Date.now() - Number(status.updatedAt) < 90_000;
+    const connected = Boolean(fresh && status?.connected);
+    await chrome.action.setIcon({ path: connected ? ACTION_ICONS.on : ACTION_ICONS.off });
+    let title = "Discord Message Memory — Discord hook waiting";
+    if (connected) title = "Discord Message Memory — Discord hook connected";
+    else if (fresh && status?.error) title = `Discord Message Memory — Discord hook error: ${status.error}`;
+    await chrome.action.setTitle({ title });
   } catch {}
 }
 
-async function syncRememberingActionIcon() {
+async function syncHookActionIcon() {
   try {
-    const data = await chrome.storage.local.get({ rememberingEnabled: DEFAULT_SETTINGS.rememberingEnabled });
-    await setRememberingActionIcon(Boolean(data.rememberingEnabled));
+    const data = await chrome.storage.local.get({ hookStatus: null });
+    await setHookActionIcon(data.hookStatus || null);
   } catch {}
 }
 
@@ -625,24 +628,23 @@ chrome.runtime.onInstalled.addListener(async () => {
     if (current[key] === undefined) missing[key] = value;
   }
   if (Object.keys(missing).length) await chrome.storage.local.set(missing);
-  const rememberingEnabled = current.rememberingEnabled ?? missing.rememberingEnabled ?? DEFAULT_SETTINGS.rememberingEnabled;
-  await setRememberingActionIcon(Boolean(rememberingEnabled));
+  await syncHookActionIcon();
   await getStorageHealth();
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  syncRememberingActionIcon();
+  syncHookActionIcon();
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "local" || !changes.rememberingEnabled) return;
-  setRememberingActionIcon(Boolean(changes.rememberingEnabled.newValue));
+  if (areaName !== "local") return;
+  if (changes.hookStatus) setHookActionIcon(changes.hookStatus.newValue || null);
 });
 
 // Service workers can be started for reasons other than install/startup (for
 // example opening the popup). Keep the toolbar state correct whenever this
 // worker wakes up.
-syncRememberingActionIcon();
+syncHookActionIcon();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
