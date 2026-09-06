@@ -3,10 +3,12 @@ const DEFAULTS = {
   showingEnabled: true,
   quickCss: "",
   hookStatus: null,
+  storageStatus: null,
   sidebarCollapsed: false
 };
 
 const EXPORT_DB_NAME = "discord-message-memory";
+const EXPORT_DB_VERSION = 2;
 const rememberToggle = document.getElementById("rememberingEnabled");
 const showingToggle = document.getElementById("showingEnabled");
 const quickCss = document.getElementById("quickCss");
@@ -31,14 +33,31 @@ const exportProgressPercent = document.getElementById("exportProgressPercent");
 const exportProgressBar = document.getElementById("exportProgressBar");
 const exportWarning = document.getElementById("exportWarning");
 
+const importLocalButton = document.getElementById("importLocalButton");
+const importLocalInput = document.getElementById("importLocalInput");
+const importMemoryButton = document.getElementById("importMemoryButton");
+const importMemoryInput = document.getElementById("importMemoryInput");
+const importStatus = document.getElementById("importStatus");
+const importStatusTitle = document.getElementById("importStatusTitle");
+const importStatusPercent = document.getElementById("importStatusPercent");
+const importStatusText = document.getElementById("importStatusText");
+const importProgressBar = document.getElementById("importProgressBar");
+
 let chats = [];
 let cssSaveTimer = null;
 let currentExportChat = null;
 let exportRunning = false;
 let exportDbPromise = null;
+let importRunning = false;
 
-function sendBackground(message) {
-  return chrome.runtime.sendMessage(message);
+async function sendBackground(message) {
+  try {
+    const response = await chrome.runtime.sendMessage(message);
+    if (response?.ok === false && response?.error) throw new Error(response.error);
+    return response;
+  } catch (error) {
+    throw new Error(`Message Memory storage worker: ${String(error?.message || error)}`);
+  }
 }
 
 function formatBytes(bytes) {
@@ -90,12 +109,22 @@ async function loadSettings() {
 }
 
 async function loadStats() {
-  const stats = await sendBackground({ type: "DMH_GET_STATS" });
-  if (!stats || stats.ok === false) return;
-  document.getElementById("messageCount").textContent = formatNumber(stats.messageCount);
-  document.getElementById("channelCount").textContent = formatNumber(stats.channelCount);
-  document.getElementById("mediaCount").textContent = formatNumber(stats.mediaCount);
-  document.getElementById("mediaBytes").textContent = formatBytes(stats.mediaBytes);
+  const ids = ["messageCount", "channelCount", "mediaCount", "mediaBytes"];
+  try {
+    const health = await sendBackground({ type: "DMH_STORAGE_HEALTH" });
+    if (!health?.ok) throw new Error(health?.error || "Storage is not ready.");
+    const stats = await sendBackground({ type: "DMH_GET_STATS" });
+    document.getElementById("messageCount").textContent = formatNumber(stats?.messageCount || 0);
+    document.getElementById("channelCount").textContent = formatNumber(stats?.channelCount || 0);
+    document.getElementById("mediaCount").textContent = formatNumber(stats?.mediaCount || 0);
+    document.getElementById("mediaBytes").textContent = formatBytes(stats?.mediaBytes || 0);
+  } catch (error) {
+    for (const id of ids) document.getElementById(id).textContent = "ERR";
+    hookPill.classList.remove("connected");
+    hookPill.classList.add("error");
+    hookPill.textContent = "Storage error";
+    hookPill.title = String(error?.message || error);
+  }
 }
 
 function uniqueNames(values) {
@@ -225,9 +254,18 @@ function renderChats() {
 
 async function loadChats() {
   chatList.innerHTML = '<div class="empty-state">Loading saved chats…</div>';
-  const result = await sendBackground({ type: "DMH_LIST_CHATS" });
-  chats = Array.isArray(result) ? result : [];
-  renderChats();
+  try {
+    const result = await sendBackground({ type: "DMH_LIST_CHATS" });
+    chats = Array.isArray(result) ? result : [];
+    renderChats();
+  } catch (error) {
+    chats = [];
+    chatList.innerHTML = "";
+    const item = document.createElement("div");
+    item.className = "empty-state";
+    item.textContent = `Storage error: ${String(error?.message || error)}`;
+    chatList.appendChild(item);
+  }
 }
 
 function showConfirm(title, body, buttonText) {
@@ -254,10 +292,24 @@ function saveCssNow() {
 
 function openExportDb() {
   if (exportDbPromise) return exportDbPromise;
-  exportDbPromise = new Promise((resolve, reject) => {
-    const request = indexedDB.open(EXPORT_DB_NAME);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error || new Error("Could not open Message Memory storage."));
+  exportDbPromise = (async () => {
+    const health = await sendBackground({ type: "DMH_STORAGE_HEALTH" });
+    if (!health?.ok) throw new Error(health?.error || "Message Memory storage is not ready.");
+
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(EXPORT_DB_NAME, EXPORT_DB_VERSION);
+      request.onupgradeneeded = () => {
+        // The background worker owns schema creation/migration. If this fires,
+        // abort rather than allowing the exporter to create an empty DB.
+        try { request.transaction.abort(); } catch {}
+        reject(new Error("Storage schema was not initialized by the background worker."));
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("Could not open Message Memory storage."));
+    });
+  })().catch(error => {
+    exportDbPromise = null;
+    throw error;
   });
   return exportDbPromise;
 }
@@ -267,6 +319,308 @@ function idbRequest(request) {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error || new Error("IndexedDB request failed."));
   });
+}
+
+
+function idbTxDone(tx) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error("IndexedDB transaction failed."));
+    tx.onabort = () => reject(tx.error || new Error("IndexedDB transaction was aborted."));
+  });
+}
+
+function importTimestamp(value) {
+  const time = Date.parse(value || "");
+  return Number.isFinite(time) ? time : 0;
+}
+
+function importAttachmentSignature(attachments) {
+  return JSON.stringify((Array.isArray(attachments) ? attachments : []).map(item => ({
+    id: item?.id || null,
+    filename: item?.filename || null,
+    url: item?.url || null,
+    size: Number(item?.size || 0)
+  })));
+}
+
+function importHistorySignature(item) {
+  return `${String(item?.content || "")}\n${importAttachmentSignature(item?.attachments)}`;
+}
+
+function mergeImportHistories(...groups) {
+  const bySignature = new Map();
+  for (const group of groups) {
+    for (const item of Array.isArray(group) ? group : []) {
+      const normalized = {
+        content: item?.content ?? "",
+        attachments: Array.isArray(item?.attachments) ? item.attachments : [],
+        editedAt: item?.editedAt || null,
+        capturedAt: Number(item?.capturedAt || 0) || Date.now()
+      };
+      const signature = importHistorySignature(normalized);
+      const previous = bySignature.get(signature);
+      if (!previous || importTimestamp(normalized.editedAt) < importTimestamp(previous.editedAt) || !previous.editedAt) {
+        bySignature.set(signature, normalized);
+      }
+    }
+  }
+  return [...bySignature.values()].sort((a, b) => {
+    const aa = importTimestamp(a.editedAt) || Number(a.capturedAt || 0);
+    const bb = importTimestamp(b.editedAt) || Number(b.capturedAt || 0);
+    return aa - bb;
+  });
+}
+
+function mergeImportAuthor(existing, incoming) {
+  if (!existing) return incoming || null;
+  if (!incoming) return existing;
+  const out = { ...existing };
+  for (const [key, value] of Object.entries(incoming)) {
+    if ((out[key] === undefined || out[key] === null || out[key] === "") && value !== undefined && value !== null && value !== "") out[key] = value;
+  }
+  return out;
+}
+
+function normalizeImportedRecord(record) {
+  const out = { ...(record || {}) };
+  out.channelId = String(out.channelId || "");
+  out.id = String(out.id || "");
+  out.key = `${out.channelId}:${out.id}`;
+  out.editHistory = Array.isArray(out.editHistory) ? out.editHistory : [];
+  out.attachments = (Array.isArray(out.attachments) ? out.attachments : []).map((attachment, index) => ({
+    ...attachment,
+    _dmhMediaKey: attachment?._dmhMediaKey || `${out.channelId}:${out.id}:${attachment?.id || index}`
+  }));
+  out.importedOnly = true;
+  out.importSource = out.importSource || "import";
+  out.importExportedAt = out.importExportedAt || new Date().toISOString();
+  out.firstSeenAt = Number(out.firstSeenAt || 0) || Date.now();
+  out.lastSeenAt = Number(out.lastSeenAt || 0) || importTimestamp(out.importExportedAt) || Date.now();
+  return out;
+}
+
+function mergeImportedRecord(existing, incomingRaw) {
+  const incoming = normalizeImportedRecord(incomingRaw);
+  if (!existing) return incoming;
+
+  // Records created by older Message Memory versions do not have importedOnly.
+  // Treat those as live-captured data and never replace their current message body
+  // with an older transcript. Only another imported-only record can be superseded
+  // by a newer imported export.
+  const existingImportedOnly = existing.importedOnly === true;
+  const existingExportTime = importTimestamp(existing.importExportedAt);
+  const incomingExportTime = importTimestamp(incoming.importExportedAt);
+  const incomingIsNewerImportedCopy = existingImportedOnly && incomingExportTime >= existingExportTime;
+
+  const chosenCurrent = incomingIsNewerImportedCopy ? incoming : existing;
+  const otherCurrent = incomingIsNewerImportedCopy ? existing : incoming;
+  let history = mergeImportHistories(existing.editHistory, incoming.editHistory);
+
+  const existingContent = String(existing.content ?? "");
+  const incomingContent = String(incoming.content ?? "");
+  const existingAttachments = Array.isArray(existing.attachments) ? existing.attachments : [];
+  const incomingAttachments = Array.isArray(incoming.attachments) ? incoming.attachments : [];
+  if (existingContent !== incomingContent || importAttachmentSignature(existingAttachments) !== importAttachmentSignature(incomingAttachments)) {
+    const historical = {
+      content: otherCurrent.content ?? "",
+      attachments: Array.isArray(otherCurrent.attachments) ? otherCurrent.attachments : [],
+      editedAt: chosenCurrent.importExportedAt || incoming.importExportedAt || existing.importExportedAt || null,
+      capturedAt: importTimestamp(otherCurrent.importExportedAt) || Number(otherCurrent.lastSeenAt || 0) || Date.now()
+    };
+    history = mergeImportHistories(history, [historical]);
+  }
+
+  const merged = { ...incoming, ...existing, ...chosenCurrent };
+  merged.key = `${incoming.channelId}:${incoming.id}`;
+  merged.channelId = incoming.channelId;
+  merged.id = incoming.id;
+  merged.author = mergeImportAuthor(existing.author, incoming.author);
+  merged.deleted = Boolean(existing.deleted || incoming.deleted);
+  merged.deletedAt = existing.deletedAt || incoming.deletedAt || null;
+  merged.editHistory = history.filter(item => importHistorySignature(item) !== importHistorySignature({ content: merged.content || "", attachments: merged.attachments || [] }));
+  merged.firstSeenAt = Math.min(...[existing.firstSeenAt, incoming.firstSeenAt].map(Number).filter(Number.isFinite).filter(value => value > 0), Date.now());
+  merged.lastSeenAt = Math.max(Number(existing.lastSeenAt || 0), Number(incoming.lastSeenAt || 0), Date.now());
+  merged.importedOnly = existingImportedOnly;
+  if (existingImportedOnly) {
+    merged.importSource = incomingIsNewerImportedCopy ? incoming.importSource : existing.importSource;
+    merged.importExportedAt = incomingIsNewerImportedCopy ? incoming.importExportedAt : existing.importExportedAt;
+  } else {
+    merged.importSource = existing.importSource || null;
+    merged.importExportedAt = existing.importExportedAt || null;
+  }
+  merged.snapshotHtml = existing.snapshotHtml || incoming.snapshotHtml || null;
+  merged.channelMeta = { ...(incoming.channelMeta || {}), ...(existing.channelMeta || {}) };
+  return merged;
+}
+
+function mergeImportedChannel(existing, incoming) {
+  if (!existing) return { ...incoming, channelId: String(incoming.channelId), lastSeenAt: Number(incoming.lastSeenAt || 0) || Date.now() };
+  const union = (a, b) => uniqueNames([...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])]);
+  return {
+    ...incoming,
+    ...existing,
+    channelId: String(incoming.channelId || existing.channelId),
+    guildId: existing.guildId || incoming.guildId || null,
+    channelName: existing.channelName || incoming.channelName || null,
+    guildName: existing.guildName || incoming.guildName || null,
+    selfName: existing.selfName || incoming.selfName || null,
+    selfUserId: existing.selfUserId || incoming.selfUserId || null,
+    recipientNames: union(existing.recipientNames, incoming.recipientNames),
+    recipientIds: union(existing.recipientIds, incoming.recipientIds),
+    channelType: existing.channelType ?? incoming.channelType ?? null,
+    parentId: existing.parentId || incoming.parentId || null,
+    isThread: Boolean(existing.isThread || incoming.isThread),
+    scope: existing.scope || incoming.scope || (existing.guildId || incoming.guildId ? "server" : "private"),
+    lastSeenAt: Math.max(Number(existing.lastSeenAt || 0), Number(incoming.lastSeenAt || 0), Date.now()),
+    importSource: existing.importSource || incoming.importSource || null
+  };
+}
+
+async function writeImportedDataset(dataset, onProgress = () => {}) {
+  const db = await openExportDb();
+  const channels = (dataset.channels || []).filter(item => item?.channelId);
+  const messages = (dataset.messages || []).filter(item => item?.channelId && item?.id);
+  const media = (dataset.media || []).filter(item => item?.key && item?.blob instanceof Blob);
+  const total = Math.max(1, channels.length + messages.length + media.length);
+  let completed = 0;
+  let messagesAdded = 0;
+  let messagesMerged = 0;
+  let mediaAdded = 0;
+  let mediaKept = 0;
+
+  if (channels.length) {
+    const tx = db.transaction("channels", "readwrite");
+    const store = tx.objectStore("channels");
+    for (const incoming of channels) {
+      const channelId = String(incoming.channelId);
+      const existing = await idbRequest(store.get(channelId));
+      store.put(mergeImportedChannel(existing, { ...incoming, channelId }));
+      completed += 1;
+      onProgress(completed, total, "Merging chat metadata…");
+    }
+    await idbTxDone(tx);
+  }
+
+  const messageBatchSize = 180;
+  for (let start = 0; start < messages.length; start += messageBatchSize) {
+    const batch = messages.slice(start, start + messageBatchSize);
+    const tx = db.transaction("messages", "readwrite");
+    const store = tx.objectStore("messages");
+    for (const incomingRaw of batch) {
+      const incoming = normalizeImportedRecord(incomingRaw);
+      const existing = await idbRequest(store.get(incoming.key));
+      if (existing) messagesMerged += 1;
+      else messagesAdded += 1;
+      store.put(mergeImportedRecord(existing, incoming));
+      completed += 1;
+      onProgress(completed, total, `Importing messages (${Math.min(start + batch.indexOf(incomingRaw) + 1, messages.length)}/${messages.length})…`);
+    }
+    await idbTxDone(tx);
+  }
+
+  const mediaBatchSize = 32;
+  for (let start = 0; start < media.length; start += mediaBatchSize) {
+    const batch = media.slice(start, start + mediaBatchSize);
+    const tx = db.transaction("media", "readwrite");
+    const store = tx.objectStore("media");
+    for (const incoming of batch) {
+      const existing = await idbRequest(store.get(incoming.key));
+      if (existing?.blob) {
+        mediaKept += 1;
+      } else {
+        store.put({ ...(existing || {}), ...incoming, cachedAt: incoming.cachedAt || Date.now() });
+        mediaAdded += 1;
+      }
+      completed += 1;
+      onProgress(completed, total, `Importing cached files (${Math.min(start + batch.indexOf(incoming) + 1, media.length)}/${media.length})…`);
+    }
+    await idbTxDone(tx);
+  }
+
+  return { channels: channels.length, messagesAdded, messagesMerged, mediaAdded, mediaKept, warnings: dataset.warnings || [] };
+}
+
+
+function setImportUi(percent, title, text = "", state = "") {
+  const safePercent = Math.max(0, Math.min(100, Math.round(Number(percent || 0))));
+  importStatus.hidden = false;
+  importStatus.classList.remove("success", "error");
+  if (state) importStatus.classList.add(state);
+  importStatusTitle.textContent = title;
+  importStatusText.textContent = text;
+  importStatusPercent.textContent = `${safePercent}%`;
+  importProgressBar.style.width = `${safePercent}%`;
+}
+
+function setImportButtonsDisabled(disabled) {
+  importLocalButton.disabled = disabled;
+  importMemoryButton.disabled = disabled;
+}
+
+async function runImportFiles(files, kind) {
+  if (importRunning || !files?.length) return;
+  if (!window.DMHImporter) {
+    setImportUi(100, "Importer unavailable", "The import parser did not load. Reload the settings page and try again.", "error");
+    return;
+  }
+
+  importRunning = true;
+  setImportButtonsDisabled(true);
+  const list = [...files];
+  const totals = { channels: 0, messagesAdded: 0, messagesMerged: 0, mediaAdded: 0, mediaKept: 0 };
+  const failures = [];
+  const warnings = [];
+
+  try {
+    for (let fileIndex = 0; fileIndex < list.length; fileIndex += 1) {
+      const file = list[fileIndex];
+      const fileBase = fileIndex / list.length;
+      const fileSpan = 1 / list.length;
+      setImportUi((fileBase + fileSpan * 0.03) * 100, `Reading ${file.name}`, `File ${fileIndex + 1} of ${list.length}`);
+
+      try {
+        const parser = kind === "local"
+          ? window.DMHImporter.parseLocalDiscordExporterFile
+          : window.DMHImporter.parseMessageMemoryExportFile;
+        const dataset = await parser(file);
+        if (!dataset?.messages?.length) throw new Error("No importable Discord messages were found in this file.");
+
+        setImportUi((fileBase + fileSpan * 0.20) * 100, `Importing ${file.name}`, `${formatNumber(dataset.messages.length)} messages found.`);
+        const result = await writeImportedDataset(dataset, (done, total, text) => {
+          const withinFile = 0.20 + 0.78 * (done / Math.max(1, total));
+          setImportUi((fileBase + fileSpan * withinFile) * 100, `Importing ${file.name}`, text);
+        });
+        for (const key of Object.keys(totals)) totals[key] += Number(result[key] || 0);
+        warnings.push(...(result.warnings || []).map(message => `${file.name}: ${message}`));
+      } catch (error) {
+        failures.push(`${file.name}: ${String(error?.message || error)}`);
+      }
+    }
+
+    await Promise.allSettled([loadChats(), loadStats()]);
+    const successfulFiles = list.length - failures.length;
+    const summary = [
+      `${successfulFiles}/${list.length} file${list.length === 1 ? "" : "s"} imported`,
+      `${formatNumber(totals.messagesAdded)} new messages`,
+      `${formatNumber(totals.messagesMerged)} existing messages merged`,
+      `${formatNumber(totals.mediaAdded)} cached files added`
+    ].join(" · ");
+    const detailLines = [];
+    if (totals.mediaKept) detailLines.push(`${formatNumber(totals.mediaKept)} cached files were already present.`);
+    if (warnings.length) detailLines.push(...warnings.slice(0, 5));
+    if (failures.length) detailLines.push(...failures.slice(0, 5));
+    if (failures.length && failures.length === list.length) {
+      setImportUi(100, "Import failed", detailLines.join("\n") || "No files were imported.", "error");
+    } else {
+      setImportUi(100, "Import complete", `${summary}${detailLines.length ? `\n${detailLines.join("\n")}` : ""}`, "success");
+    }
+  } finally {
+    importRunning = false;
+    setImportButtonsDisabled(false);
+    importLocalInput.value = "";
+    importMemoryInput.value = "";
+  }
 }
 
 function compareSnowflakes(a, b) {
@@ -440,6 +794,33 @@ function formatExportTime(value, fallbackSnowflake) {
   }).format(date);
 }
 
+
+function exportIsoTime(value, fallbackSnowflake) {
+  let date = value ? new Date(value) : null;
+  if ((!date || Number.isNaN(date.getTime())) && fallbackSnowflake) {
+    try { date = new Date(Number((BigInt(String(fallbackSnowflake)) >> 22n) + 1420070400000n)); } catch {}
+  }
+  return date && !Number.isNaN(date.getTime()) ? date.toISOString() : "";
+}
+
+function portableExportRecord(record) {
+  return JSON.parse(JSON.stringify(record || {}, (key, value) => {
+    if (key === "snapshotHtml") return undefined;
+    // Avatar data URLs can be large and are already embedded in the visible HTML.
+    // Keep ordinary Discord avatar URLs in metadata, but do not duplicate inline
+    // image data for every message in the machine-readable block.
+    if (["avatarUrl", "avatarURL", "avatar_url"].includes(key) && typeof value === "string" && value.startsWith("data:")) return undefined;
+    return value;
+  }));
+}
+
+function safeScriptJson(value) {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
 function sanitizeFilename(value) {
   const clean = String(value || "Discord chat")
     .replace(/[\\/:*?"<>|\x00-\x1f]/g, "-")
@@ -461,7 +842,8 @@ function renderEditHistory(record, options) {
   if (!options.edits || !Array.isArray(record.editHistory) || !record.editHistory.length) return "";
   return `<div class="edit-history">${record.editHistory.map(edit => {
     const text = edit.content || (Array.isArray(edit.attachments) && edit.attachments.length ? "[attachment changed]" : "[empty message]");
-    return `<div class="edit-version"><div class="edit-version-content">${linkifyText(text)}</div><div class="edit-version-time">${escapeHtml(formatExportTime(edit.editedAt || edit.capturedAt))}</div></div>`;
+    const editedAt = exportIsoTime(edit.editedAt || edit.capturedAt);
+    return `<div class="edit-version"${editedAt ? ` data-edited-at="${escapeHtml(editedAt)}"` : ""}><div class="edit-version-content">${linkifyText(text)}</div><div class="edit-version-time">${editedAt ? `<time datetime="${escapeHtml(editedAt)}">${escapeHtml(formatExportTime(editedAt))}</time>` : escapeHtml(formatExportTime(edit.editedAt || edit.capturedAt))}</div></div>`;
   }).join("")}</div>`;
 }
 
@@ -509,19 +891,19 @@ function renderAttachments(record, mediaMap) {
     const size = formatBytes(attachment.size || 0);
     const linkedBadge = !embedded && external ? '<span class="attachment-source">Discord link</span>' : "";
     if (kind === "image" && src) {
-      return `<figure class="attachment image-attachment"><a href="${escapeHtml(src)}" target="_blank"><img src="${escapeHtml(src)}" alt="${escapeHtml(filename)}" loading="lazy"></a><figcaption>${escapeHtml(filename)}${size ? ` · ${escapeHtml(size)}` : ""}${linkedBadge}</figcaption></figure>`;
+      return `<figure class="attachment image-attachment" data-dmh-media-key="${escapeHtml(key)}"><a href="${escapeHtml(src)}" target="_blank"><img src="${escapeHtml(src)}" alt="${escapeHtml(filename)}" loading="lazy"></a><figcaption>${escapeHtml(filename)}${size ? ` · ${escapeHtml(size)}` : ""}${linkedBadge}</figcaption></figure>`;
     }
     if (kind === "video" && src) {
-      return `<div class="attachment media-attachment"><video controls preload="metadata" src="${escapeHtml(src)}"></video><div>${escapeHtml(filename)}${size ? ` · ${escapeHtml(size)}` : ""}${linkedBadge}</div></div>`;
+      return `<div class="attachment media-attachment" data-dmh-media-key="${escapeHtml(key)}"><video controls preload="metadata" src="${escapeHtml(src)}"></video><div>${escapeHtml(filename)}${size ? ` · ${escapeHtml(size)}` : ""}${linkedBadge}</div></div>`;
     }
     if (kind === "audio" && src) {
       const duration = attachmentDurationSecs(attachment);
       const shortKnown = duration !== null && duration < 2;
       const durationAttr = duration !== null ? ` data-saved-duration="${escapeHtml(duration)}"` : "";
-      return `<div class="attachment audio-attachment"${durationAttr}><div class="file-name">${escapeHtml(filename)}${size ? ` · ${escapeHtml(size)}` : ""}${linkedBadge}</div><audio controls preload="metadata" src="${escapeHtml(src)}"></audio><a class="audio-download" ${shortKnown ? "" : "hidden "}download="${escapeHtml(filename)}" href="">Download audio</a></div>`;
+      return `<div class="attachment audio-attachment" data-dmh-media-key="${escapeHtml(key)}"${durationAttr}><div class="file-name">${escapeHtml(filename)}${size ? ` · ${escapeHtml(size)}` : ""}${linkedBadge}</div><audio controls preload="metadata" src="${escapeHtml(src)}"></audio><a class="audio-download" ${shortKnown ? "" : "hidden "}download="${escapeHtml(filename)}" href="">Download audio</a></div>`;
     }
     if (src) {
-      return `<a class="attachment file-attachment" href="${escapeHtml(src)}" ${embedded ? `download="${escapeHtml(filename)}"` : 'target="_blank" rel="noreferrer"'}><span class="file-icon">FILE</span><span><strong>${escapeHtml(filename)}</strong><small>${escapeHtml(size || "Attachment")}${linkedBadge}</small></span></a>`;
+      return `<a class="attachment file-attachment" data-dmh-media-key="${escapeHtml(key)}" href="${escapeHtml(src)}" ${embedded ? `download="${escapeHtml(filename)}"` : 'target="_blank" rel="noreferrer"'}><span class="file-icon">FILE</span><span><strong>${escapeHtml(filename)}</strong><small>${escapeHtml(size || "Attachment")}${linkedBadge}</small></span></a>`;
     }
     return `<div class="attachment file-attachment unavailable"><span class="file-icon">FILE</span><span><strong>${escapeHtml(filename)}</strong><small>${escapeHtml(size || "Attachment")} · cached file unavailable</small></span></div>`;
   }).join("")}</div>`;
@@ -545,18 +927,20 @@ function renderMessage(record, options, mediaMap, threadMap = new Map(), avatarM
   const initials = author.split(/\s+/).map(part => part[0]).join("").slice(0, 2).toUpperCase() || "?";
   const avatarUrl = exportAuthorAvatarUrl(record.author);
   const avatarSrc = avatarMap.get(avatarUrl) || avatarUrl;
+  const avatarMeta = ` data-dmh-author="${escapeHtml(author)}"${avatarUrl ? ` data-dmh-avatar-origin="${escapeHtml(avatarUrl)}"` : ""}`;
   const avatarHtml = avatarSrc
-    ? `<div class="avatar avatar-has-image"><span>${escapeHtml(initials)}</span><img src="${escapeHtml(avatarSrc)}" alt="${escapeHtml(author)} profile picture" loading="lazy" onerror="this.remove()"></div>`
-    : `<div class="avatar"><span>${escapeHtml(initials)}</span></div>`;
+    ? `<div class="avatar avatar-has-image"${avatarMeta}><span>${escapeHtml(initials)}</span><img src="${escapeHtml(avatarSrc)}" alt="${escapeHtml(author)} profile picture" loading="lazy" onerror="this.remove()"></div>`
+    : `<div class="avatar"${avatarMeta}><span>${escapeHtml(initials)}</span></div>`;
   const status = `${record.deleted ? '<span class="status deleted-status">DELETED</span>' : ""}${editedVisible ? '<span class="status edited-status">EDITED</span>' : ""}`;
   const bodyText = record.content ? linkifyText(record.content) : "";
   const emptyNotice = !record.content && !record.attachments?.length && !record.embeds?.length ? '<span class="empty-message">[empty or unavailable message]</span>' : "";
   const embeds = Array.isArray(record.embeds) ? record.embeds.map(renderEmbed).join("") : "";
   const stickers = Array.isArray(record.stickers) && record.stickers.length ? `<div class="stickers">${record.stickers.map(sticker => `<span>Sticker: ${escapeHtml(sticker?.name || sticker?.id || "sticker")}</span>`).join("")}</div>` : "";
-  return `<article class="${classes}" id="message-${escapeHtml(record.id)}">
+  const timestampIso = exportIsoTime(record.timestamp, record.id);
+  return `<article class="${classes}" id="message-${escapeHtml(record.id)}" data-message-id="${escapeHtml(record.id)}" data-channel-id="${escapeHtml(record.channelId)}" data-deleted="${record.deleted ? "true" : "false"}">
     ${avatarHtml}
     <div class="message-main">
-      <div class="message-header"><strong>${escapeHtml(author)}</strong><time>${escapeHtml(formatExportTime(record.timestamp, record.id))}</time><div class="statuses">${status}</div></div>
+      <div class="message-header"><strong>${escapeHtml(author)}</strong><time${timestampIso ? ` datetime="${escapeHtml(timestampIso)}"` : ""}>${escapeHtml(formatExportTime(record.timestamp, record.id))}</time><div class="statuses">${status}</div></div>
       ${renderReply(record)}
       ${renderEditHistory(record, options)}
       <div class="message-content">${bodyText}${emptyNotice}</div>
@@ -593,9 +977,19 @@ function renderExportHtml(chat, messages, threads, options, mediaMap, avatarMap)
   const threadsIndex = threads.length ? `<div class="thread-index"><strong>Saved threads:</strong>${threads.map(thread => `<button type="button" data-thread-open="${escapeHtml(thread.meta.channelId)}">${escapeHtml(thread.meta.channelName || `Thread ${thread.meta.channelId}`)} · ${formatNumber(thread.messages.length)}</button>`).join("")}</div>` : "";
   const threadPanels = renderThreadPanels(threads, options, mediaMap, avatarMap);
   const title = displayChatName(chat);
-  const exportedAt = formatExportTime(new Date().toISOString());
+  const exportedAtIso = new Date().toISOString();
+  const exportedAt = formatExportTime(exportedAtIso);
+  const portable = {
+    format: "discord-message-memory-export",
+    formatVersion: 1,
+    extensionVersion: "1.3.0",
+    exportedAt: exportedAtIso,
+    chat: { ...chat },
+    messages: messages.map(portableExportRecord),
+    threads: threads.map(thread => ({ meta: { ...thread.meta }, messages: thread.messages.map(portableExportRecord) }))
+  };
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} - Discord export</title><style>${exportDocumentCss()}</style></head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} - Discord export</title><script id="dmh-export-data" type="application/json">${safeScriptJson(portable)}</script><style>${exportDocumentCss()}</style></head>
 <body>
 <header class="topbar"><div><h1>${escapeHtml(title)}</h1><p>${escapeHtml(displayChatKind(chat))} · Channel ID ${escapeHtml(chat.channelId)}</p></div><div class="export-meta">${formatNumber(messages.length)} saved messages<br>Exported ${escapeHtml(exportedAt)} by Discord Message Memory</div></header>
 <main class="layout">${threadsIndex}<div class="messages">${messageHtml || '<div class="thread-empty">No saved messages matched the export options.</div>'}</div></main>
@@ -796,6 +1190,12 @@ document.getElementById("deleteAll").addEventListener("click", async () => {
 });
 
 document.getElementById("refreshChats").addEventListener("click", () => Promise.all([loadChats(), loadStats()]));
+
+importLocalButton.addEventListener("click", () => { if (!importRunning) importLocalInput.click(); });
+importMemoryButton.addEventListener("click", () => { if (!importRunning) importMemoryInput.click(); });
+importLocalInput.addEventListener("change", () => runImportFiles(importLocalInput.files, "local"));
+importMemoryInput.addEventListener("change", () => runImportFiles(importMemoryInput.files, "memory"));
+
 chatSearch.addEventListener("input", renderChats);
 startExportButton.addEventListener("click", runExport);
 exportDialog.addEventListener("close", () => {
@@ -812,5 +1212,5 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 (async () => {
   await loadSettings();
-  await Promise.all([loadChats(), loadStats()]);
+  await Promise.allSettled([loadChats(), loadStats()]);
 })();

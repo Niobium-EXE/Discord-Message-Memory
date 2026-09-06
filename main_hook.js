@@ -556,8 +556,19 @@
     post("DISCORD_EVENT", body);
   }
 
+  function activeRouteChannelId() {
+    try {
+      const match = location.pathname.match(/^\/channels\/(?:@me|\d+)\/(\d+)/);
+      return match?.[1] || null;
+    } catch { return null; }
+  }
+
   function createLiveDeleteAnchor(channelId, messageId) {
     if (!liveRestoreEnabled || !channelId || !messageId) return null;
+    // Anchors are only meaningful for the conversation actually visible in this
+    // tab. Background server/DM delete events should still be saved, but must not
+    // touch the active Discord DOM.
+    if (String(activeRouteChannelId() || "") !== String(channelId)) return null;
 
     const key = `${channelId}:${messageId}`;
     const existing = document.querySelector(`[data-dmh-live-delete-anchor="${key}"]`);
@@ -575,6 +586,25 @@
       const anchor = document.createElement(target.tagName === "LI" ? "li" : "div");
       anchor.setAttribute("data-dmh-live-delete-anchor", key);
       anchor.setAttribute("data-dmh-anchor-height", String(height));
+
+      // Remember the native message rows immediately around this one. The content
+      // script uses these as a stable locality hint so a live-restored row can stay
+      // at the edge of the viewport without later "travelling" with Discord's
+      // virtualized list.
+      const siblingMessageId = node => {
+        if (!(node instanceof Element)) return null;
+        const match = String(node.id || "").match(new RegExp(`^chat-messages-${channelId}-(\\d+)`));
+        return match?.[1] || null;
+      };
+      let prev = target.previousElementSibling;
+      let next = target.nextElementSibling;
+      let prevId = null;
+      let nextId = null;
+      for (let i = 0; prev && i < 8 && !prevId; i++, prev = prev.previousElementSibling) prevId = siblingMessageId(prev);
+      for (let i = 0; next && i < 8 && !nextId; i++, next = next.nextElementSibling) nextId = siblingMessageId(next);
+      if (prevId) anchor.setAttribute("data-dmh-anchor-prev", prevId);
+      if (nextId) anchor.setAttribute("data-dmh-anchor-next", nextId);
+
       anchor.setAttribute("aria-hidden", "true");
       anchor.style.cssText = [
         "display:block!important",

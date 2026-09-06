@@ -1,11 +1,42 @@
 const DB_NAME = "discord-message-memory";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const DEFAULT_SETTINGS = {
   rememberingEnabled: true,
   showingEnabled: true,
   quickCss: "",
   sidebarCollapsed: false
 };
+
+const ACTION_ICONS = {
+  off: {
+    16: "icon16.png",
+    32: "icon32.png",
+    48: "icon48.png",
+    128: "icon128.png"
+  },
+  on: {
+    16: "icon_on16.png",
+    32: "icon_on32.png",
+    48: "icon_on48.png",
+    128: "icon_on128.png"
+  }
+};
+
+async function setRememberingActionIcon(enabled) {
+  try {
+    await chrome.action.setIcon({ path: enabled ? ACTION_ICONS.on : ACTION_ICONS.off });
+    await chrome.action.setTitle({
+      title: enabled ? "Discord Message Memory — Remembering on" : "Discord Message Memory — Remembering off"
+    });
+  } catch {}
+}
+
+async function syncRememberingActionIcon() {
+  try {
+    const data = await chrome.storage.local.get({ rememberingEnabled: DEFAULT_SETTINGS.rememberingEnabled });
+    await setRememberingActionIcon(Boolean(data.rememberingEnabled));
+  } catch {}
+}
 
 let dbPromise;
 
@@ -32,27 +63,62 @@ function openDb() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
+
     request.onupgradeneeded = () => {
       const db = request.result;
+      const tx = request.transaction;
 
+      // v1.2.0 introduced a read-only exporter which could race the service
+      // worker on a fresh extension install and leave behind a version-1 DB with
+      // no stores. Version 2 deliberately repairs that state without deleting a
+      // healthy existing database.
+      let messages;
       if (!db.objectStoreNames.contains("messages")) {
-        const store = db.createObjectStore("messages", { keyPath: "key" });
-        store.createIndex("channelId", "channelId", { unique: false });
-        store.createIndex("guildId", "guildId", { unique: false });
+        messages = db.createObjectStore("messages", { keyPath: "key" });
+      } else {
+        messages = tx.objectStore("messages");
       }
+      if (!messages.indexNames.contains("channelId")) messages.createIndex("channelId", "channelId", { unique: false });
+      if (!messages.indexNames.contains("guildId")) messages.createIndex("guildId", "guildId", { unique: false });
 
+      let media;
       if (!db.objectStoreNames.contains("media")) {
-        const store = db.createObjectStore("media", { keyPath: "key" });
-        store.createIndex("channelId", "channelId", { unique: false });
-        store.createIndex("messageKey", "messageKey", { unique: false });
+        media = db.createObjectStore("media", { keyPath: "key" });
+      } else {
+        media = tx.objectStore("media");
       }
+      if (!media.indexNames.contains("channelId")) media.createIndex("channelId", "channelId", { unique: false });
+      if (!media.indexNames.contains("messageKey")) media.createIndex("messageKey", "messageKey", { unique: false });
 
       if (!db.objectStoreNames.contains("channels")) {
         db.createObjectStore("channels", { keyPath: "channelId" });
       }
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        try { db.close(); } catch {}
+        dbPromise = null;
+      };
+      resolve(db);
+    };
+    request.onerror = () => {
+      const error = request.error || new Error("Could not open Message Memory storage.");
+      dbPromise = null;
+      reject(error);
+    };
+    request.onblocked = () => {
+      // Do not reject immediately: another extension page may still have the old
+      // version open and Chromium will continue the upgrade when it closes.
+      chrome.storage.local.set({
+        storageStatus: {
+          ok: false,
+          error: "Storage upgrade is waiting for an older Message Memory page to close.",
+          updatedAt: Date.now()
+        }
+      }).catch(() => {});
+    };
   });
   return dbPromise;
 }
@@ -200,13 +266,15 @@ async function upsertMessage(incoming, eventType = "MESSAGE_CREATE") {
   merged.deletedAt = incoming.deletedAt || old?.deletedAt || null;
   merged.snapshotHtml = incoming.snapshotHtml || old?.snapshotHtml || null;
   merged.attachments = normalizeAttachmentKeys(merged);
+  merged.importedOnly = false;
 
   store.put(merged);
   await txDone(tx);
   await upsertChannelMeta(merged);
 
-  // Keep attachments inside the extension rather than relying on Discord's expiring CDN URLs.
-  await cacheAttachments(merged).catch(() => {});
+  // Attachment caching is requested separately by the content script. Keeping
+  // the metadata transaction fast prevents a slow CDN response from delaying
+  // hundreds of message-save acknowledgements during channel seeding.
   return { ok: true, record: merged };
 }
 
@@ -235,11 +303,11 @@ async function saveSnapshot(payload) {
       channelId: payload.channelId,
       id: payload.id,
       attachments: old?.attachments || payload.attachments || []
-    })
+    }),
+    importedOnly: false
   };
   store.put(merged);
   await txDone(tx);
-  await cacheAttachments(merged).catch(() => {});
   return { ok: true, record: merged };
 }
 
@@ -267,6 +335,7 @@ async function markDeletedWithRecord(incoming, extra = {}) {
   merged.editHistory = Array.isArray(old?.editHistory) ? old.editHistory : (Array.isArray(incoming?.editHistory) ? incoming.editHistory : []);
   merged.snapshotHtml = incoming?.snapshotHtml || old?.snapshotHtml || null;
   merged.attachments = normalizeAttachmentKeys(merged);
+  merged.importedOnly = false;
 
   store.put(merged);
   await txDone(tx);
@@ -315,7 +384,8 @@ async function markDeleted(channelId, id, extra = {}) {
     deleted: true,
     deletedAt: new Date().toISOString(),
     editHistory: old?.editHistory || [],
-    attachments: normalizeAttachmentKeys({ channelId, id, attachments: old?.attachments || [] })
+    attachments: normalizeAttachmentKeys({ channelId, id, attachments: old?.attachments || [] }),
+    importedOnly: false
   };
   store.put(record);
   await txDone(tx);
@@ -521,6 +591,33 @@ async function getStats() {
   };
 }
 
+async function getStorageHealth() {
+  try {
+    const db = await openDb();
+    const stores = [...db.objectStoreNames];
+    const required = ["messages", "media", "channels"];
+    const missing = required.filter(name => !stores.includes(name));
+    const status = {
+      ok: missing.length === 0,
+      dbVersion: db.version,
+      stores,
+      missingStores: missing,
+      error: missing.length ? `Missing stores: ${missing.join(", ")}` : null,
+      updatedAt: Date.now()
+    };
+    await chrome.storage.local.set({ storageStatus: status }).catch(() => {});
+    return status;
+  } catch (error) {
+    const status = {
+      ok: false,
+      error: String(error?.message || error),
+      updatedAt: Date.now()
+    };
+    await chrome.storage.local.set({ storageStatus: status }).catch(() => {});
+    return status;
+  }
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   const current = await chrome.storage.local.get(Object.keys(DEFAULT_SETTINGS));
   const missing = {};
@@ -528,8 +625,24 @@ chrome.runtime.onInstalled.addListener(async () => {
     if (current[key] === undefined) missing[key] = value;
   }
   if (Object.keys(missing).length) await chrome.storage.local.set(missing);
-  openDb().catch(() => {});
+  const rememberingEnabled = current.rememberingEnabled ?? missing.rememberingEnabled ?? DEFAULT_SETTINGS.rememberingEnabled;
+  await setRememberingActionIcon(Boolean(rememberingEnabled));
+  await getStorageHealth();
 });
+
+chrome.runtime.onStartup.addListener(() => {
+  syncRememberingActionIcon();
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local" || !changes.rememberingEnabled) return;
+  setRememberingActionIcon(Boolean(changes.rememberingEnabled.newValue));
+});
+
+// Service workers can be started for reasons other than install/startup (for
+// example opening the popup). Keep the toolbar state correct whenever this
+// worker wakes up.
+syncRememberingActionIcon();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
@@ -560,6 +673,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return deleteAllData();
       case "DMH_GET_STATS":
         return getStats();
+      case "DMH_STORAGE_HEALTH":
+        return getStorageHealth();
       default:
         return { ok: false, reason: "unknown-message" };
     }

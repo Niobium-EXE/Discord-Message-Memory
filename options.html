@@ -20,6 +20,7 @@
       <nav>
         <a href="#general">General</a>
         <a href="#saved-data">Saved data</a>
+        <a href="#import-data">Import</a>
         <a href="#quickcss">Live CSS</a>
       </nav>
       <div class="sidebar-note">All saved Discord data stays in this extension's local browser storage.</div>
@@ -81,6 +82,43 @@
           <div id="chatList" class="chat-list">
             <div class="empty-state">Loading saved chats…</div>
           </div>
+        </div>
+      </section>
+
+
+      <section id="import-data" class="section">
+        <div class="section-heading compact">
+          <div>
+            <span class="eyebrow">IMPORT</span>
+            <h2>Import previous exports</h2>
+            <p>Merge older transcripts into Message Memory without duplicating messages or replacing newer saved data.</p>
+          </div>
+        </div>
+
+        <div class="import-grid">
+          <div class="card import-card">
+            <div class="import-card-copy">
+              <strong>Import from local-discord-exporter</strong>
+              <p>Import one or more <code>.mhtml</code>/<code>.mht</code> archives made by the Local Discord History Exporter. Embedded attachments in the archive are copied into Message Memory's local cache.</p>
+            </div>
+            <button id="importLocalButton" class="secondary-button" type="button">Choose MHTML exports</button>
+            <input id="importLocalInput" type="file" accept=".mhtml,.mht,multipart/related" multiple hidden>
+          </div>
+
+          <div class="card import-card">
+            <div class="import-card-copy">
+              <strong>Import from Message Memory</strong>
+              <p>Import one or more standalone <code>.html</code> transcripts exported by this extension. Newer exports contain an internal metadata block for a more complete round trip.</p>
+            </div>
+            <button id="importMemoryButton" class="secondary-button" type="button">Choose Message Memory exports</button>
+            <input id="importMemoryInput" type="file" accept=".html,text/html" multiple hidden>
+          </div>
+        </div>
+
+        <div id="importStatus" class="card import-status" hidden>
+          <div class="import-status-row"><strong id="importStatusTitle">Preparing import…</strong><span id="importStatusPercent"></span></div>
+          <div class="import-progress-track"><div id="importProgressBar"></div></div>
+          <p id="importStatusText"></p>
         </div>
       </section>
 
@@ -181,6 +219,7 @@
     </form>
   </dialog>
 
+  <script src="importer.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

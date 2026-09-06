@@ -26,11 +26,24 @@
     window.postMessage({ source: CONTENT_SOURCE, type, ...payload }, "*");
   }
 
-  function sendBackground(message) {
+  async function sendBackground(message, retry = true) {
     try {
-      return chrome.runtime.sendMessage(message);
+      const response = await chrome.runtime.sendMessage(message);
+      if (response?.ok === false && response?.error) throw new Error(response.error);
+      return response;
     } catch (error) {
-      return Promise.reject(error);
+      if (retry) {
+        await new Promise(resolve => setTimeout(resolve, 180));
+        return sendBackground(message, false);
+      }
+      chrome.storage.local.set({
+        storageStatus: {
+          ok: false,
+          error: String(error?.message || error),
+          updatedAt: Date.now()
+        }
+      }).catch(() => {});
+      throw error;
     }
   }
 
@@ -208,7 +221,13 @@
     }
 
     const record = snapshotFallbackRecord(element, ids);
-    sendBackground({ type: "DMH_SAVE_SNAPSHOT", record }).catch(() => {});
+    sendBackground({ type: "DMH_SAVE_SNAPSHOT", record })
+      .then(() => {
+        if (record.attachments?.length) {
+          return sendBackground({ type: "DMH_CACHE_MESSAGE_ATTACHMENTS", channelId: record.channelId, id: record.id });
+        }
+      })
+      .catch(() => {});
   }
 
   function ensureCustomCssElement() {
@@ -690,17 +709,20 @@
   }
 
   function shouldInsertRecord(record, visibleRows) {
-    if (!visibleRows.length) return true;
-    const ids = visibleRows.map(item => item.ids.id).sort(compareSnowflakes);
-    const minId = ids[0];
-    const maxId = ids[ids.length - 1];
-    if (compareSnowflakes(record.id, minId) >= 0 && compareSnowflakes(record.id, maxId) <= 0) return true;
-
-    const time = snowflakeTime(record.id);
-    const minTime = snowflakeTime(minId);
-    const maxTime = snowflakeTime(maxId);
-    const buffer = 10 * 60 * 1000;
-    return time >= minTime - buffer && time <= maxTime + buffer;
+    // Historical restores are only safe when Discord has native rows from the
+    // active channel around the saved message. Never use a time buffer and never
+    // treat a transient empty list as permission to inject a row.
+    const activeChannelId = parseCurrentChannelId();
+    if (!record || !activeChannelId || String(record.channelId) !== String(activeChannelId)) return false;
+    const safeRows = (visibleRows || []).filter(item =>
+      item?.ids &&
+      item.li?.isConnected &&
+      item.li?.dataset?.dmhRestored !== "true" &&
+      String(item.ids.channelId) === String(activeChannelId)
+    );
+    if (!safeRows.length) return false;
+    const ids = safeRows.map(item => item.ids.id).sort(compareSnowflakes);
+    return compareSnowflakes(record.id, ids[0]) >= 0 && compareSnowflakes(record.id, ids[ids.length - 1]) <= 0;
   }
 
   function findMessageListContainer(channelId) {
@@ -721,6 +743,13 @@
   }
 
   function restoreAtLiveAnchor(record, attempt = 0) {
+    const activeChannelId = parseCurrentChannelId();
+    if (!record || !activeChannelId || String(record.channelId) !== String(activeChannelId)) {
+      const stale = record ? getLiveDeleteAnchor(record.channelId, record.id) : null;
+      stale?.remove();
+      return false;
+    }
+
     const anchor = getLiveDeleteAnchor(record.channelId, record.id);
     if (!anchor?.parentNode) return false;
 
@@ -730,51 +759,98 @@
       return true;
     }
 
-    // The pre-dispatch hook inserts the anchor before Discord handles the delete.
-    // Wait a few frames for React to remove the native row, while the anchor keeps
-    // that row's exact height/position reserved so the scroller cannot collapse.
     if (existing && attempt < 8) {
       setTimeout(() => restoreAtLiveAnchor(record, attempt + 1), 16);
       return true;
     }
 
     if (existing) {
-      // If Discord has not removed the native node after several frames, avoid a
-      // duplicate message id. Decorate the native row and release the placeholder.
       decorateMessageNode(existing, record);
       anchor.remove();
       return true;
     }
 
+    if (String(parseCurrentChannelId()) !== String(activeChannelId)) {
+      anchor.remove();
+      return false;
+    }
+
     const node = buildDeletedMessageNode(record);
+    node.setAttribute("data-dmh-live-positioned", "true");
+    const prev = anchor.getAttribute("data-dmh-anchor-prev");
+    const next = anchor.getAttribute("data-dmh-anchor-next");
+    if (prev) node.setAttribute("data-dmh-live-prev", prev);
+    if (next) node.setAttribute("data-dmh-live-next", next);
     anchor.replaceWith(node);
     return true;
   }
 
   function insertDeletedRecord(record, visibleRows) {
+    const activeChannelId = parseCurrentChannelId();
+    if (!record || !activeChannelId || String(record.channelId) !== String(activeChannelId)) return;
     if (restoreAtLiveAnchor(record)) return;
     if (document.getElementById(`chat-messages-${record.channelId}-${record.id}`)) return;
     if (!shouldInsertRecord(record, visibleRows)) return;
 
-    const sorted = [...visibleRows].sort((a, b) => compareSnowflakes(a.ids.id, b.ids.id));
+    const sorted = [...visibleRows]
+      .filter(item => item?.ids && item.li?.isConnected && String(item.ids.channelId) === String(activeChannelId))
+      .sort((a, b) => compareSnowflakes(a.ids.id, b.ids.id));
+    if (!sorted.length || String(parseCurrentChannelId()) !== String(activeChannelId)) return;
+
     const before = sorted.find(item => compareSnowflakes(item.ids.id, record.id) > 0)?.li || null;
     const node = buildDeletedMessageNode(record);
 
-    if (before?.parentNode) {
+    if (before?.parentNode && String(parseCurrentChannelId()) === String(activeChannelId)) {
       before.parentNode.insertBefore(node, before);
       return;
     }
 
     const tailParent = sorted[sorted.length - 1]?.li?.parentNode;
-    if (tailParent) {
+    if (tailParent && String(parseCurrentChannelId()) === String(activeChannelId)) {
       tailParent.appendChild(node);
-      return;
     }
+    // No generic empty-list fallback: during navigation Discord often mounts an
+    // empty chat list before the real channel rows arrive. Live deletes in a truly
+    // empty channel still use restoreAtLiveAnchor(), which has the exact position.
+  }
 
-    // Important for channels where the deleted message was the last/only native row.
-    // Discord can leave the message list itself mounted while removing every message LI.
-    const list = findMessageListContainer(record.channelId);
-    if (list) list.appendChild(node);
+  function purgeWrongChannelRestores(channelId) {
+    const active = channelId ? String(channelId) : null;
+    document.querySelectorAll('[data-dmh-restored="true"]').forEach(node => {
+      const ids = parseMessageElement(node);
+      if (!active || !ids || String(ids.channelId) !== active) node.remove();
+    });
+  }
+
+  function pruneHistoricalRestores(channelId, visibleRows) {
+    const active = channelId ? String(channelId) : null;
+    if (!active) return;
+    const safeRows = (visibleRows || []).filter(item =>
+      item?.ids && item.li?.isConnected && String(item.ids.channelId) === active && item.li?.dataset?.dmhRestored !== "true"
+    );
+    if (!safeRows.length) return;
+
+    const ids = safeRows.map(item => item.ids.id).sort(compareSnowflakes);
+    const minId = ids[0];
+    const maxId = ids[ids.length - 1];
+    const nativeIds = new Set(ids.map(String));
+
+    document.querySelectorAll(`li[data-dmh-restored="true"][id^="chat-messages-${active}-"]`).forEach(node => {
+      const parsed = parseMessageElement(node);
+      if (!parsed) return node.remove();
+
+      // A live deletion may legitimately be just outside the new min/max because
+      // it was the newest/oldest visible message. Keep it while one of its captured
+      // native neighbors is still present; once both neighbors disappear, it can no
+      // longer be trusted to belong to the current virtualized window.
+      if (node.getAttribute("data-dmh-live-positioned") === "true") {
+        const prev = node.getAttribute("data-dmh-live-prev");
+        const next = node.getAttribute("data-dmh-live-next");
+        if ((prev && nativeIds.has(prev)) || (next && nativeIds.has(next))) return;
+      }
+
+      if (compareSnowflakes(parsed.id, minId) < 0 || compareSnowflakes(parsed.id, maxId) > 0) node.remove();
+    });
   }
 
   function clearDecorations() {
@@ -795,33 +871,38 @@
   }
 
   async function getHistory(channelId, force = false) {
-    if (!force && historyCache.has(channelId)) return historyCache.get(channelId);
+    const key = String(channelId);
+    if (!force && historyCache.has(key)) return historyCache.get(key);
     const records = await sendBackground({ type: "DMH_GET_CHANNEL_HISTORY", channelId }).catch(() => []);
-    const safe = Array.isArray(records) ? records : [];
-    historyCache.set(channelId, safe);
+    const safe = (Array.isArray(records) ? records : []).filter(record => record && String(record.channelId) === key);
+    historyCache.set(key, safe);
     return safe;
   }
 
   async function refreshCurrentChannel(force = false) {
     const channelId = parseCurrentChannelId();
     currentChannelId = channelId;
+    purgeWrongChannelRestores(channelId);
     if (!channelId || !settings.showingEnabled) {
       clearDecorations();
       return;
     }
 
     const records = await getHistory(channelId, force);
-    if (channelId !== parseCurrentChannelId() || !settings.showingEnabled) return;
+    if (String(channelId) !== String(parseCurrentChannelId()) || !settings.showingEnabled) return;
 
-    const byId = new Map(records.map(record => [record.id, record]));
+    const byId = new Map(records.map(record => [String(record.id), record]));
     const visibleRows = getVisibleNativeMessageRows(channelId);
+    pruneHistoricalRestores(channelId, visibleRows);
 
     for (const { li, ids } of visibleRows) {
-      const record = byId.get(ids.id);
+      if (String(channelId) !== String(parseCurrentChannelId())) return;
+      const record = byId.get(String(ids.id));
       if (record) decorateMessageNode(li, record);
     }
 
     for (const record of records) {
+      if (String(channelId) !== String(parseCurrentChannelId())) return;
       if (record.deleted) insertDeletedRecord(record, visibleRows);
     }
   }
@@ -923,6 +1004,9 @@
           await sendBackground({ type: "DMH_UPSERT_MESSAGE", record: data.previousRecord, eventType: "MESSAGE_SNAPSHOT" });
         }
         await sendBackground({ type: "DMH_UPSERT_MESSAGE", record: data.record, eventType });
+        if (data.record.attachments?.length) {
+          sendBackground({ type: "DMH_CACHE_MESSAGE_ATTACHMENTS", channelId: data.record.channelId, id: data.record.id }).catch(() => {});
+        }
         if (eventType === "MESSAGE_UPDATE") {
           historyCache.delete(data.record.channelId);
           if (data.record.channelId === parseCurrentChannelId()) scheduleRefresh(true);
@@ -990,6 +1074,9 @@
     settings = { ...SETTINGS_DEFAULTS, ...(await chrome.storage.local.get(SETTINGS_DEFAULTS)) };
     applyQuickCss();
     currentChannelId = parseCurrentChannelId();
+    // Wake the service worker and force the v2 storage migration before the
+    // first capture burst. This also repairs malformed v1 databases in-place.
+    sendBackground({ type: "DMH_STORAGE_HEALTH" }).catch(() => {});
     postToPage("SET_LIVE_RESTORE_ENABLED", { enabled: Boolean(settings.rememberingEnabled && settings.showingEnabled) });
     postToPage("PING_HOOK");
     if (settings.rememberingEnabled && currentChannelId) {
@@ -1018,7 +1105,7 @@
         lastRoute = location.href;
         onRouteChanged();
       }
-    }, 350);
+    }, 150);
 
     scanVisibleMessages();
     scheduleRefresh(true);
