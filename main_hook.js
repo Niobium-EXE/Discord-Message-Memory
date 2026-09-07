@@ -90,7 +90,8 @@
 
     const currentScore = webpackCandidateScore(webpackRequire);
     const nextScore = webpackCandidateScore(req);
-    if (!webpackRequire || nextScore > currentScore) {
+    const bothMainAssetRuntimes = req !== webpackRequire && safeGet(req, "p") === "/assets/" && safeGet(webpackRequire, "p") === "/assets/";
+    if (!webpackRequire || nextScore > currentScore || (bothMainAssetRuntimes && nextScore >= currentScore)) {
       webpackRequire = req;
       webpackCaptureMethod = method || "Webpack runtime sniffer";
       return true;
@@ -210,65 +211,86 @@
   }
 
   function findStoreByName(name) {
-    const direct = findModule(store => {
+    // Prefer Flux.Store.getAll(): this registry reflects the live store instances.
+    // The Webpack cache can retain retired store objects after Discord hot-reloads
+    // part of the client, which is exactly the long-running failure the watchdog
+    // needs to recover from.
+    const flux = findModule(value => typeof safeGet(safeGet(value, "Store"), "getAll") === "function");
+    try {
+      const stores = flux?.Store?.getAll?.();
+      if (stores && typeof stores[Symbol.iterator] === "function") {
+        let match = null;
+        for (const store of stores) {
+          try {
+            if (store?.getName?.() === name || store?.constructor?.displayName === name) match = store;
+          } catch {}
+        }
+        if (match) return match;
+      }
+    } catch {}
+
+    return findModule(store => {
       try {
         if (safeGet(safeGet(store, "constructor"), "displayName") === name) return true;
         if (typeof safeGet(store, "getName") === "function" && store.getName() === name) return true;
       } catch {}
       return false;
     });
-    if (direct) return direct;
-
-    // Newer Vencord builds also enumerate Flux.Store.getAll() first because some
-    // store instances are easier to locate there than by their export shape.
-    const flux = findModule(value => typeof safeGet(safeGet(value, "Store"), "getAll") === "function");
-    try {
-      const stores = flux?.Store?.getAll?.();
-      if (stores && typeof stores[Symbol.iterator] === "function") {
-        for (const store of stores) {
-          try { if (store?.getName?.() === name || store?.constructor?.displayName === name) return store; } catch {}
-        }
-      }
-    } catch {}
-    return null;
   }
 
-  function discoverStores() {
+  function discoverStores(refresh = false) {
     captureWebpackRequire();
     if (!webpackRequire) return false;
 
-    if (!messageStore) {
-      messageStore = findStoreByName("MessageStore") || findModule(m =>
-        typeof safeGet(m, "getMessage") === "function" &&
-        typeof safeGet(m, "getMessages") === "function"
-      );
+    const findMessageStore = () => findStoreByName("MessageStore") || findModule(m =>
+      typeof safeGet(m, "getMessage") === "function" &&
+      typeof safeGet(m, "getMessages") === "function"
+    );
+    const findChannelStore = () => findStoreByName("ChannelStore") || findModule(m =>
+      typeof safeGet(m, "getChannel") === "function" &&
+      (typeof safeGet(m, "getDMFromUserId") === "function" || typeof safeGet(m, "getMutableGuildChannelsForGuild") === "function" || typeof safeGet(m, "getAllThreadsForParent") === "function")
+    ) || findModule(m => typeof safeGet(m, "getChannel") === "function");
+    const findGuildStore = () => findStoreByName("GuildStore") || findModule(m => typeof safeGet(m, "getGuild") === "function" && typeof safeGet(m, "getGuilds") === "function");
+    const findUserStore = () => findStoreByName("UserStore") || findModule(m =>
+      typeof safeGet(m, "getCurrentUser") === "function" && typeof safeGet(m, "getUser") === "function"
+    );
+
+    if (!messageStore || refresh) {
+      const fresh = findMessageStore();
+      if (fresh) messageStore = fresh;
     }
 
-    // Discord Flux stores expose the exact dispatcher instance they are registered
-    // with as _dispatcher. Prefer this over finding an arbitrary export which happens
-    // to have dispatch/subscribe-shaped methods.
-    if (!dispatcher) dispatcher = dispatcherFromStore(messageStore);
-    if (!dispatcher) {
+    // The important long-running case: Discord can replace Flux stores/dispatcher
+    // without doing a full page navigation. Always prefer the dispatcher currently
+    // owned by the live MessageStore. If its identity changes, the old patch and
+    // subscriptions belong to the retired dispatcher and must be reinstalled.
+    let freshDispatcher = dispatcherFromStore(messageStore);
+    if (!freshDispatcher && (refresh || !dispatcher)) {
       const storeWithDispatcher = findModule(m => dispatcherFromStore(m));
-      dispatcher = dispatcherFromStore(storeWithDispatcher);
+      freshDispatcher = dispatcherFromStore(storeWithDispatcher);
     }
-    if (!dispatcher) dispatcher = findModule(looksLikeDispatcher);
-
-    if (!channelStore) {
-      channelStore = findStoreByName("ChannelStore") || findModule(m =>
-        typeof safeGet(m, "getChannel") === "function" &&
-        (typeof safeGet(m, "getDMFromUserId") === "function" || typeof safeGet(m, "getMutableGuildChannelsForGuild") === "function" || typeof safeGet(m, "getAllThreadsForParent") === "function")
-      ) || findModule(m => typeof safeGet(m, "getChannel") === "function");
-    }
-
-    if (!guildStore) {
-      guildStore = findStoreByName("GuildStore") || findModule(m => typeof safeGet(m, "getGuild") === "function" && typeof safeGet(m, "getGuilds") === "function");
+    if (!freshDispatcher && !dispatcher) freshDispatcher = findModule(looksLikeDispatcher);
+    if (freshDispatcher && freshDispatcher !== dispatcher) {
+      dispatcher = freshDispatcher;
+      dispatchPatched = false;
+      subscribed = false;
+      hookMethod = "none";
+      recentEvents.clear();
+    } else if (!dispatcher && freshDispatcher) {
+      dispatcher = freshDispatcher;
     }
 
-    if (!userStore) {
-      userStore = findStoreByName("UserStore") || findModule(m =>
-        typeof safeGet(m, "getCurrentUser") === "function" && typeof safeGet(m, "getUser") === "function"
-      );
+    if (!channelStore || refresh) {
+      const fresh = findChannelStore();
+      if (fresh) channelStore = fresh;
+    }
+    if (!guildStore || refresh) {
+      const fresh = findGuildStore();
+      if (fresh) guildStore = fresh;
+    }
+    if (!userStore || refresh) {
+      const fresh = findUserStore();
+      if (fresh) userStore = fresh;
     }
 
     return Boolean(dispatcher);
@@ -783,6 +805,29 @@
     }
   }
 
+  function dispatchMethodIsWrapped(methodName) {
+    if (!dispatcher) return false;
+    const fn = safeGet(dispatcher, methodName);
+    return typeof fn === "function" && Boolean(safeGet(fn, "__dmhWrapped"));
+  }
+
+  function isDispatchPatchAlive() {
+    if (!dispatcher) return false;
+    if (dispatchMethodIsWrapped("dispatch")) return true;
+    if (typeof safeGet(dispatcher, "dirtyDispatch") === "function" && dispatchMethodIsWrapped("dirtyDispatch")) return true;
+    return false;
+  }
+
+  function hookIsConnected() {
+    const dispatchAvailable = Boolean(dispatcher && typeof safeGet(dispatcher, "dispatch") === "function");
+    const patchAlive = isDispatchPatchAlive();
+    dispatchPatched = patchAlive;
+    // Prefer a verifiable dispatch patch. Subscriptions remain a fallback for a
+    // dispatcher shape that cannot be patched, but do not let a stale subscription
+    // flag hide a lost patch when dispatch() is still available.
+    return patchAlive || (!dispatchAvailable && subscribed);
+  }
+
   function patchDispatchMethod(methodName) {
     if (!dispatcher || typeof safeGet(dispatcher, methodName) !== "function") return false;
     const original = dispatcher[methodName];
@@ -807,7 +852,12 @@
   }
 
   function installDispatchPatch() {
-    if (dispatchPatched || !dispatcher) return dispatchPatched;
+    if (!dispatcher) return false;
+    if (isDispatchPatchAlive()) {
+      dispatchPatched = true;
+      return true;
+    }
+    dispatchPatched = false;
     const dispatchOk = patchDispatchMethod("dispatch");
     const dirtyOk = typeof safeGet(dispatcher, "dirtyDispatch") === "function" ? patchDispatchMethod("dirtyDispatch") : false;
     dispatchPatched = dispatchOk || dirtyOk;
@@ -841,7 +891,7 @@
       });
       return true;
     } catch (error) {
-      post("HOOK_STATUS", { connected: dispatchPatched, dispatchPatched, subscribed: false, hookMethod, webpackFound: Boolean(webpackRequire), webpackCaptureMethod, runtimeSnifferInstalled, error: String(error?.message || error) });
+      post("HOOK_STATUS", { connected: hookIsConnected(), dispatchPatched, subscribed: false, hookMethod, webpackFound: Boolean(webpackRequire), webpackCaptureMethod, runtimeSnifferInstalled, error: String(error?.message || error) });
       return false;
     }
   }
@@ -851,7 +901,7 @@
     if (!force && now - lastProgressStatusAt < 1500) return;
     lastProgressStatusAt = now;
     post("HOOK_STATUS", {
-      connected: dispatchPatched || subscribed,
+      connected: hookIsConnected(),
       dispatchPatched,
       subscribed,
       hookMethod,
@@ -864,14 +914,26 @@
     });
   }
 
-  function bootstrap() {
-    if (!discoverStores()) {
+  function bootstrap(refreshBindings = false) {
+    if (!discoverStores(refreshBindings)) {
+      dispatchPatched = false;
       postProgressStatus();
       return false;
     }
     installDispatchPatch();
+    // Keep subscriptions as a backup path. If Discord swaps the dispatcher,
+    // discoverStores(true) resets subscribed and attaches them to the new one.
     subscribe();
-    return dispatchPatched || subscribed;
+    return hookIsConnected();
+  }
+
+  function watchdogTick(forceStatus = true) {
+    const oldDispatcher = dispatcher;
+    const wasPatchAlive = isDispatchPatchAlive();
+    bootstrap(true);
+    const repaired = oldDispatcher !== dispatcher || (!wasPatchAlive && isDispatchPatchAlive());
+    if (forceStatus || repaired) postProgressStatus(true);
+    return hookIsConnected();
   }
 
   window.addEventListener("message", event => {
@@ -905,9 +967,9 @@
     }
 
     if (data.type === "PING_HOOK") {
-      bootstrap();
+      watchdogTick(false);
       post("HOOK_STATUS", {
-        connected: dispatchPatched || subscribed,
+        connected: hookIsConnected(),
         dispatchPatched,
         subscribed,
         hookMethod,
@@ -923,9 +985,33 @@
 
   installWebpackRuntimeSniffer();
   bootstrap();
+
+  // Fast startup retry: only for initial discovery.
   const retryTimer = setInterval(() => {
-    bootstrap();
-    if (!(dispatchPatched || subscribed)) postProgressStatus();
-    if ((dispatchPatched || subscribed) && messageStore && channelStore) clearInterval(retryTimer);
+    bootstrap(true);
+    if (!hookIsConnected()) postProgressStatus();
+    if (hookIsConnected() && messageStore && channelStore) clearInterval(retryTimer);
   }, 500);
+
+  // Permanent low-cost self-healing watchdog. Discord can hot-reload Flux stores or
+  // replace the dispatcher after the tab has been open for hours. Revalidate the
+  // actual wrapped function and current MessageStore._dispatcher instead of trusting
+  // the boolean established at page load.
+  setInterval(() => {
+    try { watchdogTick(true); } catch (error) {
+      post("HOOK_STATUS", {
+        connected: false,
+        dispatchPatched: false,
+        subscribed: false,
+        hookMethod,
+        webpackFound: Boolean(webpackRequire),
+        webpackCaptureMethod,
+        runtimeSnifferInstalled,
+        lastHookEventAt,
+        messageStoreFound: Boolean(messageStore),
+        channelStoreFound: Boolean(channelStore),
+        error: `Hook watchdog: ${String(error?.message || error)}`
+      });
+    }
+  }, 20_000);
 })();

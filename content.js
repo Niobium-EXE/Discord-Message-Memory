@@ -15,6 +15,7 @@
   let refreshTimer = null;
   let scanTimer = null;
   let routeTimer = null;
+  let hookHeartbeatTimer = null;
   let observer = null;
   let customStyleElement = null;
   let lastRoute = location.href;
@@ -1137,6 +1138,19 @@
         onRouteChanged();
       }
     }, 150);
+
+    // Keep the MAIN-world hook alive for long-running Discord tabs. This refreshes
+    // hookStatus (so the toolbar/popup do not go stale) and asks the page hook to
+    // verify/rebind Discord's current dispatcher if Discord hot-reloaded it.
+    hookHeartbeatTimer = setInterval(() => {
+      postToPage("PING_HOOK");
+    }, 25_000);
+
+    window.addEventListener("pageshow", () => postToPage("PING_HOOK"));
+    window.addEventListener("focus", () => postToPage("PING_HOOK"));
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) postToPage("PING_HOOK");
+    });
 
     scanVisibleMessages();
     scheduleRefresh(true);
