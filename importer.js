@@ -500,6 +500,11 @@
       importExportedAt: exportedAt || new Date().toISOString()
     };
     if (record.deleted) record.deletedAt = exportedAt || new Date().toISOString();
+    if (element.classList.contains("call-event")) {
+      record.type = 3;
+      record.systemEventKind = "call";
+      record.systemEventText = textWithBreaks(element.querySelector(".call-event-content span:last-child")) || textWithBreaks(element.querySelector(".call-event-content"));
+    }
 
     const authorName = element.querySelector(".message-header strong")?.textContent?.trim() || "Unknown user";
     const avatar = element.querySelector(".avatar img[src]")?.getAttribute("src") || "";

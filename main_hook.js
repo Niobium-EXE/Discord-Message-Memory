@@ -450,6 +450,17 @@
     const pinnedRaw = safeGet(message, "pinned");
     const ttsRaw = safeGet(message, "tts");
     const threadRaw = safeGet(message, "thread");
+    const callRaw = safeGet(message, "call");
+
+    let callDurationSecs = null;
+    if (callRaw) {
+      const endedRaw = safeGet(callRaw, "ended_timestamp") ?? safeGet(callRaw, "endedTimestamp") ?? safeGet(callRaw, "ended_at") ?? safeGet(callRaw, "endedAt");
+      const startedMs = timestampRaw ? new Date(timestampRaw).getTime() : NaN;
+      const endedMs = endedRaw ? new Date(endedRaw).getTime() : NaN;
+      if (Number.isFinite(startedMs) && Number.isFinite(endedMs) && endedMs >= startedMs) {
+        callDurationSecs = Math.max(0, (endedMs - startedMs) / 1000);
+      }
+    }
 
     const record = {
       id: String(id),
@@ -470,6 +481,9 @@
       referencedMessage: plain(referencedRaw) || null,
       messageReference: plain(messageReferenceRaw) || null,
       thread: plain(threadRaw) || null,
+      call: plain(callRaw) || null,
+      callDurationSecs,
+      systemEventKind: Number(typeRaw) === 3 ? "call" : null,
       flags: flagsRaw ?? 0,
       type: typeRaw ?? 0,
       pinned: Boolean(pinnedRaw),
@@ -494,6 +508,11 @@
       if (referencedRaw === undefined) delete record.referencedMessage;
       if (messageReferenceRaw === undefined) delete record.messageReference;
       if (threadRaw === undefined) delete record.thread;
+      if (callRaw === undefined) {
+        delete record.call;
+        delete record.callDurationSecs;
+        if (Number(typeRaw) !== 3) delete record.systemEventKind;
+      }
       if (flagsRaw === undefined) delete record.flags;
       if (typeRaw === undefined) delete record.type;
       if (pinnedRaw === undefined) delete record.pinned;

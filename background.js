@@ -26,11 +26,22 @@ async function setHookActionIcon(status = null) {
   try {
     const fresh = status?.updatedAt && Date.now() - Number(status.updatedAt) < 90_000;
     const connected = Boolean(fresh && status?.connected);
-    await chrome.action.setIcon({ path: connected ? ACTION_ICONS.on : ACTION_ICONS.off });
+    const iconPath = connected ? ACTION_ICONS.on : ACTION_ICONS.off;
     let title = "Discord Message Memory — Discord hook waiting";
     if (connected) title = "Discord Message Memory — Discord hook connected";
     else if (fresh && status?.error) title = `Discord Message Memory — Discord hook error: ${status.error}`;
+
+    await chrome.action.setIcon({ path: iconPath });
     await chrome.action.setTitle({ title });
+
+    // Opera / Opera GX only. Chrome, Edge, Brave, etc. do not expose
+    // opr.sidebarAction, so the package has no sidebar behavior there.
+    const operaSidebar = globalThis.opr?.sidebarAction;
+    if (operaSidebar) {
+      try { operaSidebar.setPanel({ panel: "options.html" }); } catch {}
+      try { operaSidebar.setIcon({ path: connected ? "icon_on32.png" : "icon32.png" }); } catch {}
+      try { operaSidebar.setTitle({ title }); } catch {}
+    }
   } catch {}
 }
 
@@ -288,14 +299,21 @@ async function saveSnapshot(payload) {
   const tx = db.transaction("messages", "readwrite");
   const store = tx.objectStore("messages");
   const old = await requestToPromise(store.get(key));
+  const oldContent = typeof old?.content === "string" ? old.content : "";
+  const payloadContent = typeof payload?.content === "string" ? payload.content : "";
   const merged = {
     ...(old || {}),
     key,
     channelId: payload.channelId,
     id: payload.id,
-    content: old?.content ?? payload.content ?? "",
+    content: oldContent.trim() ? oldContent : payloadContent,
     author: mergeAuthorData(old?.author, payload.author),
     timestamp: old?.timestamp || payload.timestamp || null,
+    type: old?.type ?? payload.type ?? 0,
+    systemEventKind: old?.systemEventKind || payload.systemEventKind || null,
+    systemEventText: old?.systemEventText || payload.systemEventText || null,
+    call: old?.call || payload.call || null,
+    callDurationSecs: old?.callDurationSecs ?? payload.callDurationSecs ?? null,
     firstSeenAt: old?.firstSeenAt || Date.now(),
     lastSeenAt: Date.now(),
     snapshotHtml: payload.snapshotHtml || old?.snapshotHtml || null,
@@ -305,7 +323,7 @@ async function saveSnapshot(payload) {
     attachments: normalizeAttachmentKeys({
       channelId: payload.channelId,
       id: payload.id,
-      attachments: old?.attachments || payload.attachments || []
+      attachments: old?.attachments?.length ? old.attachments : (payload.attachments || [])
     }),
     importedOnly: false
   };

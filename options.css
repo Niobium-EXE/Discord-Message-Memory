@@ -333,3 +333,61 @@ input:focus-visible + .switch { outline: 2px solid #aab3ff; outline-offset: 2px;
 @media (max-width: 760px) {
   .import-grid { grid-template-columns: 1fr; }
 }
+
+
+/* v1.3.3 - Opera / Opera GX sidebar panel.
+ * Opera sizes sidebar panels to a narrow browser-owned width. At that width we
+ * keep the real options page, but remove its redundant desktop navigation rail
+ * and let every settings section use the panel's full width. */
+@media (max-width: 680px) {
+  html, body { min-width: 0 !important; width: 100% !important; overflow-x: hidden !important; }
+  .app-shell,
+  .app-shell.sidebar-collapsed { display: block !important; min-width: 0 !important; width: 100% !important; }
+  .sidebar { display: none !important; }
+  .content,
+  .app-shell.sidebar-collapsed .content {
+    width: 100% !important;
+    max-width: none !important;
+    min-width: 0 !important;
+    padding: 18px 12px 42px !important;
+  }
+  .section { margin-bottom: 36px !important; scroll-margin-top: 12px !important; }
+  .section-heading,
+  .section-heading.compact {
+    align-items: flex-start !important;
+    flex-direction: column !important;
+    gap: 10px !important;
+    margin-bottom: 13px !important;
+  }
+  h1 { font-size: 22px !important; }
+  h2 { font-size: 19px !important; }
+  .hook-pill { align-self: flex-start !important; }
+  .toggle-row {
+    grid-template-columns: minmax(0,1fr) 40px !important;
+    gap: 12px !important;
+    padding: 15px 13px !important;
+  }
+  .stats-grid { grid-template-columns: repeat(2, minmax(0,1fr)) !important; gap: 7px !important; }
+  .stat-card { padding: 11px !important; }
+  .saved-toolbar { flex-wrap: wrap !important; padding: 9px !important; }
+  .saved-toolbar input { flex-basis: 100% !important; }
+  .chat-list { max-height: none !important; }
+  .chat-row {
+    grid-template-columns: minmax(0,1fr) !important;
+    gap: 10px !important;
+    padding: 12px 10px !important;
+  }
+  .chat-title { flex-wrap: wrap !important; }
+  .chat-title strong { white-space: normal !important; overflow-wrap: anywhere !important; }
+  .chat-actions { justify-content: flex-start !important; flex-wrap: wrap !important; }
+  .import-grid { grid-template-columns: 1fr !important; }
+  .import-card { padding: 13px !important; }
+  .export-options { grid-template-columns: 1fr !important; }
+  .advanced-option { grid-column: auto !important; }
+  .export-dialog,
+  .confirm-dialog { width: calc(100vw - 16px) !important; max-width: none !important; }
+  .export-dialog form,
+  .confirm-dialog form { padding: 14px !important; }
+  .info-tip::after { right: -8px !important; width: min(245px, calc(100vw - 44px)) !important; }
+  #quickCss { min-height: 320px !important; font-size: 11px !important; padding: 12px !important; }
+}

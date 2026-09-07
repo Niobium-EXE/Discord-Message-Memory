@@ -142,6 +142,34 @@
     return map[ext] || "application/octet-stream";
   }
 
+  function normalizeSystemText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function extractCallSystemText(clean, authorName, timeNode) {
+    let text = normalizeSystemText(clean?.innerText || clean?.textContent || "");
+    if (!text) return null;
+    const lower = text.toLowerCase();
+    if (!lower.includes("started a call") && !lower.includes("missed a call") && !lower.includes("call that lasted")) return null;
+
+    const renderedTime = normalizeSystemText(timeNode?.textContent || "");
+    if (renderedTime && text.endsWith(renderedTime)) text = text.slice(0, -renderedTime.length).trim();
+
+    // Discord sometimes repeats accessible timestamp text in the cloned row. Keep
+    // only the user-facing call sentence when we can identify it.
+    const startIndex = text.toLowerCase().indexOf("started a call");
+    if (startIndex >= 0) {
+      const tail = text.slice(startIndex).match(/^started a call(?: that lasted .*?)(?:\.|$)/i)?.[0];
+      if (tail) return tail.trim();
+    }
+    const missedIndex = text.toLowerCase().indexOf("missed a call");
+    if (missedIndex >= 0) {
+      const tail = text.slice(missedIndex).match(/^missed a call(?:\.|$)/i)?.[0];
+      if (tail) return tail.trim();
+    }
+    return text;
+  }
+
   function snapshotFallbackRecord(element, ids) {
     const context = parseCurrentContext();
 
@@ -153,6 +181,8 @@
     const contentNode = clean.querySelector(`[id^="message-content-${ids.id}"]`) || clean.querySelector('[id^="message-content-"]');
     const authorNode = clean.querySelector(`[id^="message-username-${ids.id}"]`) || clean.querySelector('[id^="message-username-"]') || clean.querySelector("h3 span");
     const timeNode = clean.querySelector("time[datetime]");
+    const authorName = authorNode?.textContent?.trim() || "Unknown user";
+    const callSystemText = extractCallSystemText(clean, authorName, timeNode);
     // The Flux message normally gives us the author's id + avatar hash. Keep a DOM
     // avatar URL as a fallback so exports can still show profile pictures if a
     // Discord build only exposes the rendered row to us.
@@ -197,8 +227,9 @@
       },
       id: ids.id,
       content: contentNode?.innerText || contentNode?.textContent || "",
-      author: authorNode ? { username: authorNode.textContent?.trim() || "Unknown user", avatarUrl } : (avatarUrl ? { username: "Unknown user", avatarUrl } : null),
+      author: authorNode ? { username: authorName, avatarUrl } : (avatarUrl ? { username: "Unknown user", avatarUrl } : null),
       timestamp: timeNode?.getAttribute("datetime") || null,
+      ...(callSystemText ? { type: 3, systemEventKind: "call", systemEventText: callSystemText } : {}),
       attachments,
       snapshotHtml: sanitizeSnapshot(element)
     };
