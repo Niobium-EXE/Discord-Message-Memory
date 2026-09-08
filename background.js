@@ -1,5 +1,11 @@
 const DB_NAME = "discord-message-memory";
 const DB_VERSION = 2;
+const DISCORD_TAB_PATTERNS = [
+  "https://discord.com/*",
+  "https://ptb.discord.com/*",
+  "https://canary.discord.com/*"
+];
+
 const DEFAULT_SETTINGS = {
   rememberingEnabled: true,
   showingEnabled: true,
@@ -314,6 +320,7 @@ async function saveSnapshot(payload) {
     systemEventText: old?.systemEventText || payload.systemEventText || null,
     call: old?.call || payload.call || null,
     callDurationSecs: old?.callDurationSecs ?? payload.callDurationSecs ?? null,
+    links: Array.isArray(payload.links) && payload.links.length ? payload.links : (Array.isArray(old?.links) ? old.links : []),
     firstSeenAt: old?.firstSeenAt || Date.now(),
     lastSeenAt: Date.now(),
     snapshotHtml: payload.snapshotHtml || old?.snapshotHtml || null,
@@ -639,6 +646,40 @@ async function getStorageHealth() {
   }
 }
 
+async function injectFreshContentBridge(tabId) {
+  if (!tabId || !chrome.scripting?.executeScript) return false;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["content.js"],
+      world: "ISOLATED"
+    });
+    return true;
+  } catch { return false; }
+}
+
+async function ensureMainHookForTab(tabId) {
+  if (!tabId || !chrome.scripting?.executeScript) return false;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["main_hook.js"],
+      world: "MAIN"
+    });
+    return true;
+  } catch { return false; }
+}
+
+async function reconnectOpenDiscordTabs() {
+  if (!chrome.tabs?.query || !chrome.scripting?.executeScript) return;
+  try {
+    const tabs = await chrome.tabs.query({ url: DISCORD_TAB_PATTERNS });
+    for (const tab of tabs) {
+      if (tab?.id) injectFreshContentBridge(tab.id);
+    }
+  } catch {}
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   const current = await chrome.storage.local.get(Object.keys(DEFAULT_SETTINGS));
   const missing = {};
@@ -648,10 +689,12 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (Object.keys(missing).length) await chrome.storage.local.set(missing);
   await syncHookActionIcon();
   await getStorageHealth();
+  reconnectOpenDiscordTabs();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   syncHookActionIcon();
+  reconnectOpenDiscordTabs();
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -663,6 +706,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 // example opening the popup). Keep the toolbar state correct whenever this
 // worker wakes up.
 syncHookActionIcon();
+setTimeout(() => reconnectOpenDiscordTabs(), 250);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
@@ -695,6 +739,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return getStats();
       case "DMH_STORAGE_HEALTH":
         return getStorageHealth();
+      case "DMH_ENSURE_MAIN_HOOK": {
+        const tabId = sender?.tab?.id;
+        if (!tabId) return { ok: false, reason: "no-tab" };
+        const ok = await ensureMainHookForTab(tabId);
+        return { ok };
+      }
       default:
         return { ok: false, reason: "unknown-message" };
     }

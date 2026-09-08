@@ -1,6 +1,10 @@
 (() => {
   "use strict";
 
+  const HOOK_INSTANCE_VERSION = "1.3.9";
+  if (window.__DMH_MAIN_HOOK_VERSION__ === HOOK_INSTANCE_VERSION) return;
+  window.__DMH_MAIN_HOOK_VERSION__ = HOOK_INSTANCE_VERSION;
+
   const OUT_SOURCE = "discord-message-memory-page";
   const IN_SOURCE = "discord-message-memory-content";
   const LOAD_EVENTS = [
@@ -26,6 +30,64 @@
   let hookMethod = "none";
   let lastProgressStatusAt = 0;
   const recentEvents = new Map();
+
+  // DM-only secondary tap. Discord can expose more than one Flux-like dispatcher
+  // at runtime, and the dispatcher hanging off MessageStore is not always the one
+  // that receives background private-message gateway actions. Subscribe to every
+  // live dispatcher candidate we can find, but only forward actions that are
+  // confidently private (DM/group DM or no guild id with no server-channel proof).
+  // This leaves normal guild tracking on the primary hook and makes the extra
+  // background/unopened-chat coverage DM-only.
+  const privateTapDispatchers = new WeakSet();
+  let privateTapDispatcherCount = 0;
+  let lastPrivateTapInstallAt = 0;
+
+  // Keep a short in-page delivery backlog until the isolated content bridge
+  // confirms that an event reached extension storage. This protects messages
+  // that arrive while Chromium is replacing/reloading the extension context.
+  const pendingHookEvents = new Map();
+  const PENDING_EVENT_TTL = 6 * 60 * 60 * 1000;
+  const PENDING_EVENT_MAX = 10000;
+  let nextHookEventSequence = 1;
+
+  function prunePendingHookEvents() {
+    const now = Date.now();
+    for (const [seq, item] of pendingHookEvents) {
+      if (!item || now - Number(item.createdAt || 0) > PENDING_EVENT_TTL) pendingHookEvents.delete(seq);
+    }
+    if (pendingHookEvents.size > PENDING_EVENT_MAX) {
+      const removeCount = pendingHookEvents.size - PENDING_EVENT_MAX;
+      for (const seq of [...pendingHookEvents.keys()].slice(0, removeCount)) pendingHookEvents.delete(seq);
+    }
+  }
+
+  function queueHookEvent(body) {
+    const eventSeq = `${Date.now()}-${nextHookEventSequence++}`;
+    const envelope = { ...(body || {}), eventSeq };
+    pendingHookEvents.set(eventSeq, { createdAt: Date.now(), body: envelope });
+    prunePendingHookEvents();
+    return envelope;
+  }
+
+  function acknowledgeHookEvent(eventSeq) {
+    if (eventSeq) pendingHookEvents.delete(String(eventSeq));
+  }
+
+  function replayPendingHookEvents() {
+    prunePendingHookEvents();
+    for (const item of pendingHookEvents.values()) {
+      if (item?.body) post("DISCORD_EVENT", { ...item.body, replayed: true });
+    }
+  }
+
+  // Discord's MessageStore does not necessarily retain messages from background
+  // channels/DMs that the user has not opened. Keep our own lightweight copy of
+  // every message event the hook sees so a later MESSAGE_DELETE can still carry
+  // the original content even when MessageStore.getMessage() returns nothing.
+  const observedMessageCache = new Map();
+  const OBSERVED_MESSAGE_TTL = 24 * 60 * 60 * 1000;
+  const OBSERVED_MESSAGE_MAX = 50000;
+  let lastObservedCachePrune = 0;
 
   function post(type, payload = {}) {
     window.postMessage({ source: OUT_SOURCE, type, ...payload }, "*");
@@ -554,7 +616,10 @@
 
   function emitMessage(eventType, message, hints = {}) {
     const record = normalizeMessage(message, hints.channelId, hints.guildId, eventType === "MESSAGE_UPDATE");
-    if (record) post("DISCORD_EVENT", { eventType, record });
+    if (record) {
+      const cachedRecord = cacheObservedRecord(record);
+      post("DISCORD_EVENT", { eventType, record: cachedRecord });
+    }
   }
 
   function getArrayFromMessageCollection(collection) {
@@ -566,6 +631,56 @@
       if (collection._map && typeof collection._map.values === "function") return [...collection._map.values()];
     } catch {}
     return [];
+  }
+
+  function observedMessageKey(channelId, messageId) {
+    return `${String(channelId || "")}:${String(messageId || "")}`;
+  }
+
+  function pruneObservedMessageCache(force = false) {
+    const now = Date.now();
+    if (!force && now - lastObservedCachePrune < 60_000 && observedMessageCache.size <= OBSERVED_MESSAGE_MAX) return;
+    lastObservedCachePrune = now;
+    for (const [key, entry] of observedMessageCache) {
+      if (!entry || now - Number(entry.seenAt || 0) > OBSERVED_MESSAGE_TTL) observedMessageCache.delete(key);
+    }
+    if (observedMessageCache.size > OBSERVED_MESSAGE_MAX) {
+      const overflow = observedMessageCache.size - OBSERVED_MESSAGE_MAX;
+      const oldest = [...observedMessageCache.entries()]
+        .sort((a, b) => Number(a[1]?.seenAt || 0) - Number(b[1]?.seenAt || 0))
+        .slice(0, overflow);
+      for (const [key] of oldest) observedMessageCache.delete(key);
+    }
+  }
+
+  function cacheObservedRecord(record) {
+    if (!record?.channelId || !record?.id) return record || null;
+    const key = observedMessageKey(record.channelId, record.id);
+    const previous = observedMessageCache.get(key)?.record || null;
+    const merged = { ...(previous || {}) };
+    for (const [field, value] of Object.entries(record)) {
+      if (value !== undefined) merged[field] = value;
+    }
+    observedMessageCache.set(key, { seenAt: Date.now(), record: merged });
+    pruneObservedMessageCache(false);
+    return merged;
+  }
+
+  function getObservedRecord(channelId, messageId) {
+    if (!channelId || !messageId) return null;
+    const key = observedMessageKey(channelId, messageId);
+    const entry = observedMessageCache.get(key);
+    if (!entry) return null;
+    if (Date.now() - Number(entry.seenAt || 0) > OBSERVED_MESSAGE_TTL) {
+      observedMessageCache.delete(key);
+      return null;
+    }
+    return entry.record || null;
+  }
+
+  function removeObservedRecord(channelId, messageId) {
+    if (!channelId || !messageId) return;
+    observedMessageCache.delete(observedMessageKey(channelId, messageId));
   }
 
   function eventFingerprint(eventType, payload) {
@@ -594,7 +709,8 @@
     const fingerprint = eventFingerprint(eventType, payload);
     if (!rememberEvent(fingerprint)) return;
     lastHookEventAt = Date.now();
-    post("DISCORD_EVENT", body);
+    const envelope = queueHookEvent(body);
+    post("DISCORD_EVENT", envelope);
   }
 
   function activeRouteChannelId() {
@@ -680,27 +796,39 @@
   function handleCreate(payload) {
     const message = safeGet(payload, "message") || payload;
     const record = normalizeMessage(message, safeGet(payload, "channelId") || safeGet(payload, "channel_id"), safeGet(payload, "guildId") || safeGet(payload, "guild_id"), false);
-    if (record) postHookEvent("MESSAGE_CREATE", payload, { eventType: "MESSAGE_CREATE", record });
+    if (record) {
+      const cachedRecord = cacheObservedRecord(record);
+      postHookEvent("MESSAGE_CREATE", payload, { eventType: "MESSAGE_CREATE", record: cachedRecord });
+    }
   }
 
   function handleUpdate(payload, previousRecord = null) {
     const message = safeGet(payload, "message") || payload;
     const record = normalizeMessage(message, safeGet(payload, "channelId") || safeGet(payload, "channel_id"), safeGet(payload, "guildId") || safeGet(payload, "guild_id"), true);
-    if (record) postHookEvent("MESSAGE_UPDATE", payload, { eventType: "MESSAGE_UPDATE", record, previousRecord });
+    if (record) {
+      const cachedBefore = previousRecord || getObservedRecord(record.channelId, record.id);
+      const cachedRecord = cacheObservedRecord(record);
+      postHookEvent("MESSAGE_UPDATE", payload, { eventType: "MESSAGE_UPDATE", record: cachedRecord, previousRecord: cachedBefore });
+    }
   }
 
   function handleDelete(payload, previousRecord = null, liveAnchor = null) {
     const data = normalizeDeletePayload(payload);
     if (!data.id || !data.channelId) return;
+    const nested = safeGet(payload, "message");
+    const payloadRecord = nested ? normalizeMessage(nested, data.channelId, data.guildId, false) : null;
+    const cachedRecord = getObservedRecord(data.channelId, data.id);
+    const bestPrevious = previousRecord || payloadRecord || cachedRecord || null;
     postHookEvent("MESSAGE_DELETE", payload, {
       eventType: "MESSAGE_DELETE",
       channelId: data.channelId,
       id: data.id,
       guildId: data.guildId,
-      previousRecord,
+      previousRecord: bestPrevious,
       liveAnchor,
       channelMeta: getChannelMeta(data.channelId, data.guildId)
     });
+    removeObservedRecord(data.channelId, data.id);
   }
 
   function handleBulkDelete(payload, previousRecords = [], liveAnchors = []) {
@@ -709,15 +837,24 @@
     const idsRaw = safeGet(payload, "ids");
     const ids = Array.isArray(idsRaw) ? idsRaw : (idsRaw && typeof idsRaw[Symbol.iterator] === "function" ? [...idsRaw] : []);
     if (!channelId || !ids.length) return;
+    const channelKey = String(channelId);
+    const previousById = new Map((previousRecords || []).filter(Boolean).map(record => [String(record.id), record]));
+    const recoveredRecords = [];
+    for (const rawId of ids) {
+      const id = String(rawId);
+      const recovered = previousById.get(id) || getObservedRecord(channelKey, id);
+      if (recovered) recoveredRecords.push(recovered);
+    }
     postHookEvent("MESSAGE_DELETE_BULK", payload, {
       eventType: "MESSAGE_DELETE_BULK",
-      channelId: String(channelId),
+      channelId: channelKey,
       ids: ids.map(String),
       guildId: guildId ? String(guildId) : null,
-      previousRecords,
+      previousRecords: recoveredRecords,
       liveAnchors,
-      channelMeta: getChannelMeta(String(channelId), guildId ? String(guildId) : null)
+      channelMeta: getChannelMeta(channelKey, guildId ? String(guildId) : null)
     });
+    for (const rawId of ids) removeObservedRecord(channelKey, String(rawId));
   }
 
   function handleLoadedMessages(payload, eventType) {
@@ -738,11 +875,14 @@
 
   function snapshotBeforeDelete(payload) {
     const data = normalizeDeletePayload(payload);
-    if (!data.id || !data.channelId || !messageStore) return null;
-    try {
-      const oldMessage = messageStore.getMessage?.(data.channelId, data.id);
-      return oldMessage ? normalizeMessage(oldMessage, data.channelId, data.guildId, false) : null;
-    } catch { return null; }
+    if (!data.id || !data.channelId) return null;
+    if (messageStore) {
+      try {
+        const oldMessage = messageStore.getMessage?.(data.channelId, data.id);
+        if (oldMessage) return normalizeMessage(oldMessage, data.channelId, data.guildId, false);
+      } catch {}
+    }
+    return getObservedRecord(data.channelId, data.id);
   }
 
   function snapshotBeforeBulkDelete(payload) {
@@ -750,14 +890,18 @@
     const guildId = safeGet(payload, "guildId") || safeGet(payload, "guild_id") || null;
     const idsRaw = safeGet(payload, "ids");
     const ids = Array.isArray(idsRaw) ? idsRaw : (idsRaw && typeof idsRaw[Symbol.iterator] === "function" ? [...idsRaw] : []);
-    if (!channelId || !messageStore) return [];
+    if (!channelId) return [];
     const records = [];
     for (const id of ids) {
-      try {
-        const oldMessage = messageStore.getMessage?.(String(channelId), String(id));
-        const record = oldMessage ? normalizeMessage(oldMessage, String(channelId), guildId ? String(guildId) : null, false) : null;
-        if (record) records.push(record);
-      } catch {}
+      let record = null;
+      if (messageStore) {
+        try {
+          const oldMessage = messageStore.getMessage?.(String(channelId), String(id));
+          record = oldMessage ? normalizeMessage(oldMessage, String(channelId), guildId ? String(guildId) : null, false) : null;
+        } catch {}
+      }
+      if (!record) record = getObservedRecord(String(channelId), String(id));
+      if (record) records.push(record);
     }
     return records;
   }
@@ -766,11 +910,14 @@
     const nested = safeGet(payload, "message") || payload;
     const id = safeGet(nested, "id") || safeGet(payload, "id");
     const channelId = safeGet(nested, "channel_id") || safeGet(nested, "channelId") || safeGet(payload, "channel_id") || safeGet(payload, "channelId");
-    if (!id || !channelId || !messageStore) return null;
-    try {
-      const oldMessage = messageStore.getMessage?.(String(channelId), String(id));
-      return oldMessage ? normalizeMessage(oldMessage, String(channelId), null, false) : null;
-    } catch { return null; }
+    if (!id || !channelId) return null;
+    if (messageStore) {
+      try {
+        const oldMessage = messageStore.getMessage?.(String(channelId), String(id));
+        if (oldMessage) return normalizeMessage(oldMessage, String(channelId), null, false);
+      } catch {}
+    }
+    return getObservedRecord(String(channelId), String(id));
   }
 
   function observeFluxAction(payload, phase = "pre") {
@@ -887,13 +1034,113 @@
         runtimeSnifferInstalled,
         lastHookEventAt,
         messageStoreFound: Boolean(messageStore),
-        channelStoreFound: Boolean(channelStore)
+        channelStoreFound: Boolean(channelStore),
+      privateDmTapDispatchers: privateTapDispatcherCount
       });
       return true;
     } catch (error) {
       post("HOOK_STATUS", { connected: hookIsConnected(), dispatchPatched, subscribed: false, hookMethod, webpackFound: Boolean(webpackRequire), webpackCaptureMethod, runtimeSnifferInstalled, error: String(error?.message || error) });
       return false;
     }
+  }
+
+  function privateActionInfo(payload) {
+    const nested = safeGet(payload, "message") || payload || {};
+    const channelId = safeGet(nested, "channel_id") || safeGet(nested, "channelId") || safeGet(payload, "channel_id") || safeGet(payload, "channelId") || null;
+    const guildId = safeGet(nested, "guild_id") || safeGet(nested, "guildId") || safeGet(payload, "guild_id") || safeGet(payload, "guildId") || null;
+    if (!channelId) return { private: false, channelId: null, guildId: guildId ? String(guildId) : null };
+    if (guildId) return { private: false, channelId: String(channelId), guildId: String(guildId) };
+
+    let channel = null;
+    try { channel = channelStore?.getChannel?.(String(channelId)) || null; } catch {}
+    const type = Number(safeGet(channel, "type"));
+    const channelGuildId = safeGet(channel, "guild_id") || safeGet(channel, "guildId") || null;
+    if (channelGuildId) return { private: false, channelId: String(channelId), guildId: String(channelGuildId) };
+    if (Number.isFinite(type)) {
+      if (type === 1 || type === 3) return { private: true, channelId: String(channelId), guildId: null };
+      // Known non-private Discord channel type: do not let the secondary tap widen
+      // itself into server tracking just because guild_id was absent on an action.
+      if (![1, 3].includes(type)) return { private: false, channelId: String(channelId), guildId: null };
+    }
+
+    // An unknown channel with no guild id is how background DM actions commonly
+    // arrive before ChannelStore has hydrated that DM. Treat only this ambiguous
+    // no-guild case as private; the normal primary hook still handles everything.
+    return { private: true, channelId: String(channelId), guildId: null };
+  }
+
+  function privateTapCreate(payload) {
+    const info = privateActionInfo(payload);
+    if (!info.private) return;
+    handleCreate(payload);
+  }
+
+  function privateTapUpdate(payload) {
+    const info = privateActionInfo(payload);
+    if (!info.private) return;
+    handleUpdate(payload, null);
+  }
+
+  function privateTapDelete(payload) {
+    const info = privateActionInfo(payload);
+    if (!info.private) return;
+    handleDelete(payload, null, null);
+  }
+
+  function privateTapBulkDelete(payload) {
+    const info = privateActionInfo(payload);
+    if (!info.private) return;
+    handleBulkDelete(payload, [], []);
+  }
+
+  function collectDispatcherCandidates() {
+    const found = new Set();
+    const add = value => { if (looksLikeDispatcher(value)) found.add(value); };
+    add(dispatcher);
+    add(dispatcherFromStore(messageStore));
+
+    // Live Flux stores are the strongest source because each store points at the
+    // dispatcher instance it currently belongs to.
+    const flux = findModule(value => typeof safeGet(safeGet(value, "Store"), "getAll") === "function");
+    try {
+      const stores = flux?.Store?.getAll?.();
+      if (stores && typeof stores[Symbol.iterator] === "function") {
+        for (const store of stores) add(dispatcherFromStore(store));
+      }
+    } catch {}
+
+    // Discord occasionally keeps another gateway-facing Flux dispatcher only in a
+    // Webpack export. Scan all exports as a fallback. This runs on the 20s watchdog,
+    // not per message, so the cost stays small.
+    if (webpackRequire?.c) {
+      try {
+        for (const mod of Object.values(webpackRequire.c)) {
+          const exportsObject = safeGet(mod, "exports");
+          for (const candidate of candidatesFromExports(exportsObject)) add(candidate);
+        }
+      } catch {}
+    }
+    return [...found];
+  }
+
+  function installPrivateDmTaps(force = false) {
+    const now = Date.now();
+    if (!force && now - lastPrivateTapInstallAt < 5000) return privateTapDispatcherCount;
+    lastPrivateTapInstallAt = now;
+    captureWebpackRequire();
+    discoverStores(false);
+    for (const candidate of collectDispatcherCandidates()) {
+      if (privateTapDispatchers.has(candidate)) continue;
+      try {
+        candidate.subscribe("MESSAGE_CREATE", privateTapCreate);
+        candidate.subscribe("MESSAGE_UPDATE", privateTapUpdate);
+        candidate.subscribe("MESSAGE_DELETE", privateTapDelete);
+        candidate.subscribe("MESSAGE_DELETE_BULK", privateTapBulkDelete);
+        privateTapDispatchers.add(candidate);
+        privateTapDispatcherCount += 1;
+      } catch {}
+    }
+    return privateTapDispatcherCount;
   }
 
   function postProgressStatus(force = false) {
@@ -910,7 +1157,8 @@
       runtimeSnifferInstalled,
       lastHookEventAt,
       messageStoreFound: Boolean(messageStore),
-      channelStoreFound: Boolean(channelStore)
+      channelStoreFound: Boolean(channelStore),
+      privateDmTapDispatchers: privateTapDispatcherCount
     });
   }
 
@@ -924,6 +1172,7 @@
     // Keep subscriptions as a backup path. If Discord swaps the dispatcher,
     // discoverStores(true) resets subscribed and attaches them to the new one.
     subscribe();
+    installPrivateDmTaps(false);
     return hookIsConnected();
   }
 
@@ -931,6 +1180,7 @@
     const oldDispatcher = dispatcher;
     const wasPatchAlive = isDispatchPatchAlive();
     bootstrap(true);
+    installPrivateDmTaps(true);
     const repaired = oldDispatcher !== dispatcher || (!wasPatchAlive && isDispatchPatchAlive());
     if (forceStatus || repaired) postProgressStatus(true);
     return hookIsConnected();
@@ -966,6 +1216,16 @@
       return;
     }
 
+    if (data.type === "ACK_HOOK_EVENT") {
+      acknowledgeHookEvent(data.eventSeq);
+      return;
+    }
+
+    if (data.type === "REQUEST_EVENT_BACKLOG") {
+      replayPendingHookEvents();
+      return;
+    }
+
     if (data.type === "PING_HOOK") {
       watchdogTick(false);
       post("HOOK_STATUS", {
@@ -978,13 +1238,15 @@
         runtimeSnifferInstalled,
         lastHookEventAt,
         messageStoreFound: Boolean(messageStore),
-        channelStoreFound: Boolean(channelStore)
+        channelStoreFound: Boolean(channelStore),
+      privateDmTapDispatchers: privateTapDispatcherCount
       });
     }
   });
 
   installWebpackRuntimeSniffer();
   bootstrap();
+  installPrivateDmTaps(true);
 
   // Fast startup retry: only for initial discovery.
   const retryTimer = setInterval(() => {

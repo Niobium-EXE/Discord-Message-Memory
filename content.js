@@ -1,6 +1,10 @@
 (() => {
   "use strict";
 
+  const CONTENT_INSTANCE_VERSION = "1.3.8";
+  if (globalThis.__DMH_CONTENT_INSTANCE_VERSION__ === CONTENT_INSTANCE_VERSION) return;
+  globalThis.__DMH_CONTENT_INSTANCE_VERSION__ = CONTENT_INSTANCE_VERSION;
+
   const PAGE_SOURCE = "discord-message-memory-page";
   const CONTENT_SOURCE = "discord-message-memory-content";
   const SETTINGS_DEFAULTS = {
@@ -19,6 +23,9 @@
   let observer = null;
   let customStyleElement = null;
   let lastRoute = location.href;
+  let extensionContextInvalid = false;
+  let lastHookStatusReceivedAt = 0;
+  let ensureMainHookTimer = null;
 
   const mediaObjectUrls = new Map();
   const mediaLoadPromises = new Map();
@@ -27,25 +34,72 @@
     window.postMessage({ source: CONTENT_SOURCE, type, ...payload }, "*");
   }
 
+  function extensionContextAlive() {
+    if (extensionContextInvalid) return false;
+    try { return Boolean(chrome?.runtime?.id); } catch { return false; }
+  }
+
+  function invalidateExtensionContext(error = null) {
+    const message = String(error?.message || error || "");
+    if (!/Extension context invalidated|Access to extension API denied|context invalidated/i.test(message) && extensionContextAlive()) return false;
+    extensionContextInvalid = true;
+    try { if (observer) observer.disconnect(); } catch {}
+    observer = null;
+    if (refreshTimer) clearTimeout(refreshTimer);
+    if (scanTimer) clearTimeout(scanTimer);
+    if (routeTimer) clearInterval(routeTimer);
+    if (hookHeartbeatTimer) clearInterval(hookHeartbeatTimer);
+    if (ensureMainHookTimer) clearTimeout(ensureMainHookTimer);
+    refreshTimer = scanTimer = routeTimer = hookHeartbeatTimer = ensureMainHookTimer = null;
+    return true;
+  }
+
+  async function safeStorageSet(value) {
+    if (!extensionContextAlive()) return false;
+    try {
+      await chrome.storage.local.set(value);
+      return true;
+    } catch (error) {
+      invalidateExtensionContext(error);
+      return false;
+    }
+  }
+
+  async function safeStorageGet(defaults) {
+    if (!extensionContextAlive()) throw new Error("Extension context invalidated");
+    try {
+      return await chrome.storage.local.get(defaults);
+    } catch (error) {
+      invalidateExtensionContext(error);
+      throw error;
+    }
+  }
+
   async function sendBackground(message, retry = true) {
+    if (!extensionContextAlive()) throw new Error("Extension context invalidated");
     try {
       const response = await chrome.runtime.sendMessage(message);
       if (response?.ok === false && response?.error) throw new Error(response.error);
       return response;
     } catch (error) {
+      if (invalidateExtensionContext(error)) throw error;
       if (retry) {
         await new Promise(resolve => setTimeout(resolve, 180));
         return sendBackground(message, false);
       }
-      chrome.storage.local.set({
+      await safeStorageSet({
         storageStatus: {
           ok: false,
           error: String(error?.message || error),
           updatedAt: Date.now()
         }
-      }).catch(() => {});
+      });
       throw error;
     }
+  }
+
+  function acknowledgeHookEvent(data) {
+    if (data?.eventSeq) postToPage("ACK_HOOK_EVENT", { eventSeq: data.eventSeq });
   }
 
   function parseCurrentContext() {
@@ -171,6 +225,28 @@
     return text;
   }
 
+  function extractVisibleMessageLinks(root, messageId) {
+    if (!(root instanceof Element)) return [];
+    const contentNode = root.querySelector(`[id^="message-content-${messageId}"]`) || root.querySelector('[id^="message-content-"]');
+    if (!contentNode) return [];
+    const links = [];
+    const seen = new Set();
+    for (const anchor of contentNode.querySelectorAll('a[href]')) {
+      const raw = anchor.getAttribute('href') || anchor.href || '';
+      let url = '';
+      try {
+        const parsed = new URL(raw, location.href);
+        if (!['http:', 'https:'].includes(parsed.protocol)) continue;
+        url = parsed.href;
+      } catch { continue; }
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      const label = (anchor.innerText || anchor.textContent || '').trim();
+      links.push({ url, text: label && label !== url ? label : '' });
+    }
+    return links;
+  }
+
   function snapshotFallbackRecord(element, ids) {
     const context = parseCurrentContext();
 
@@ -184,6 +260,7 @@
     const timeNode = clean.querySelector("time[datetime]");
     const authorName = authorNode?.textContent?.trim() || "Unknown user";
     const callSystemText = extractCallSystemText(clean, authorName, timeNode);
+    const links = extractVisibleMessageLinks(clean, ids.id);
     // The Flux message normally gives us the author's id + avatar hash. Keep a DOM
     // avatar URL as a fallback so exports can still show profile pictures if a
     // Discord build only exposes the rendered row to us.
@@ -231,6 +308,7 @@
       author: authorNode ? { username: authorName, avatarUrl } : (avatarUrl ? { username: "Unknown user", avatarUrl } : null),
       timestamp: timeNode?.getAttribute("datetime") || null,
       ...(callSystemText ? { type: 3, systemEventKind: "call", systemEventText: callSystemText } : {}),
+      links,
       attachments,
       snapshotHtml: sanitizeSnapshot(element)
     };
@@ -683,6 +761,24 @@
     content.id = `message-content-${record.id}`;
     content.className = "dmh-message-content";
     content.textContent = record.content || "";
+    if (!record.content && Array.isArray(record.links) && record.links.length) {
+      for (const item of record.links) {
+        const raw = typeof item === "string" ? item : item?.url;
+        if (!raw) continue;
+        try {
+          const parsed = new URL(raw);
+          if (!["http:", "https:"].includes(parsed.protocol)) continue;
+          const link = document.createElement("a");
+          link.href = parsed.href;
+          link.target = "_blank";
+          link.rel = "noreferrer";
+          link.textContent = (typeof item === "object" && item?.text) ? item.text : parsed.href;
+          content.appendChild(link);
+          content.appendChild(document.createElement("br"));
+        } catch {}
+      }
+      if (content.lastChild?.nodeName === "BR") content.lastChild.remove();
+    }
     body.appendChild(content);
 
     if (record.attachments?.length) {
@@ -972,7 +1068,10 @@
   }
 
   function handleDiscordEvent(data) {
-    if (!settings.rememberingEnabled) return;
+    if (!settings.rememberingEnabled) {
+      acknowledgeHookEvent(data);
+      return;
+    }
     const eventType = data.eventType;
 
     if (eventType === "MESSAGE_DELETE") {
@@ -985,6 +1084,7 @@
           extra: { guildId: data.guildId, channelMeta: data.channelMeta }
         });
 
+        acknowledgeHookEvent(data);
         const record = result?.record;
         historyCache.delete(data.channelId);
 
@@ -1015,6 +1115,7 @@
           extra: { guildId: data.guildId, channelMeta: data.channelMeta }
         });
 
+        acknowledgeHookEvent(data);
         historyCache.delete(data.channelId);
         if (settings.showingEnabled && data.channelId === parseCurrentChannelId()) {
           for (const record of result?.records || []) restoreAtLiveAnchor(record);
@@ -1036,6 +1137,7 @@
           await sendBackground({ type: "DMH_UPSERT_MESSAGE", record: data.previousRecord, eventType: "MESSAGE_SNAPSHOT" });
         }
         await sendBackground({ type: "DMH_UPSERT_MESSAGE", record: data.record, eventType });
+        acknowledgeHookEvent(data);
         if (data.record.attachments?.length) {
           sendBackground({ type: "DMH_CACHE_MESSAGE_ATTACHMENTS", channelId: data.record.channelId, id: data.record.id }).catch(() => {});
         }
@@ -1052,7 +1154,8 @@
     const data = event.data;
     if (data.type === "DISCORD_EVENT") handleDiscordEvent(data);
     if (data.type === "HOOK_STATUS") {
-      chrome.storage.local.set({
+      lastHookStatusReceivedAt = Date.now();
+      safeStorageSet({
         hookStatus: {
           connected: Boolean(data.connected),
           dispatchPatched: Boolean(data.dispatchPatched),
@@ -1067,11 +1170,11 @@
           error: data.error || null,
           updatedAt: Date.now()
         }
-      }).catch(() => {});
+      });
     }
   });
 
-  chrome.storage.onChanged.addListener((changes, area) => {
+  if (extensionContextAlive()) try { chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
     let visibilityChanged = false;
     let rememberingChanged = false;
@@ -1100,10 +1203,10 @@
       }
       scanVisibleMessages();
     }
-  });
+  }); } catch (error) { invalidateExtensionContext(error); }
 
   async function init() {
-    settings = { ...SETTINGS_DEFAULTS, ...(await chrome.storage.local.get(SETTINGS_DEFAULTS)) };
+    settings = { ...SETTINGS_DEFAULTS, ...(await safeStorageGet(SETTINGS_DEFAULTS)) };
     applyQuickCss();
     currentChannelId = parseCurrentChannelId();
     // Wake the service worker and force the v2 storage migration before the
@@ -1111,6 +1214,22 @@
     sendBackground({ type: "DMH_STORAGE_HEALTH" }).catch(() => {});
     postToPage("SET_LIVE_RESTORE_ENABLED", { enabled: Boolean(settings.rememberingEnabled && settings.showingEnabled) });
     postToPage("PING_HOOK");
+    postToPage("REQUEST_EVENT_BACKLOG");
+
+    // If this bridge was injected into a Discord tab that was already open when
+    // the extension started, ask the service worker to inject the MAIN-world
+    // hook only when no existing hook answers our ping.
+    ensureMainHookTimer = setTimeout(async () => {
+      if (!extensionContextAlive() || Date.now() - lastHookStatusReceivedAt < 1400) return;
+      try {
+        await sendBackground({ type: "DMH_ENSURE_MAIN_HOOK" }, false);
+        setTimeout(() => {
+          postToPage("PING_HOOK");
+          postToPage("REQUEST_EVENT_BACKLOG");
+        }, 250);
+      } catch {}
+    }, 1600);
+
     if (settings.rememberingEnabled && currentChannelId) {
       const context = parseCurrentContext();
       postToPage("REQUEST_CHANNEL_MESSAGES", { channelId: currentChannelId, guildId: context?.guildId || null, channelScope: context?.channelScope || null });
