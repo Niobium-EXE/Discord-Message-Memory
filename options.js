@@ -344,6 +344,22 @@ function normalizeImportText(value) {
     .trim();
 }
 
+function normalizeImportedSemanticText(value) {
+  return normalizeImportText(value)
+    // Ignore emoji presentation differences produced by the old exporter
+    // (inline emoji image vs Unicode/native emoji) when deciding whether two
+    // imported snapshots represent an actual text edit.
+    .replace(/\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*/gu, "")
+    .replace(/[\uFE0E\uFE0F]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isImportPlaceholderText(value) {
+  const text = normalizeImportText(value).toLowerCase();
+  return !text || text === "[empty message]" || text === "[empty or unavailable message]" || text === "[attachment changed]";
+}
+
 function importAttachmentSignature(attachments) {
   return JSON.stringify((Array.isArray(attachments) ? attachments : []).map(item => ({
     id: item?.id || null,
@@ -417,6 +433,12 @@ function normalizeImportedRecord(record) {
   out.id = String(out.id || "");
   out.key = `${out.channelId}:${out.id}`;
   out.editHistory = Array.isArray(out.editHistory) ? out.editHistory : [];
+  if (out.importSource === "local-discord-exporter") {
+    out.importExplicitEdit = out.importExplicitEdit === true;
+    out.editHistory = out.importExplicitEdit
+      ? out.editHistory.map(item => ({ ...item, importExplicitEdit: item?.importExplicitEdit !== false }))
+      : [];
+  }
   out.attachments = (Array.isArray(out.attachments) ? out.attachments : []).map((attachment, index) => ({
     ...attachment,
     _dmhMediaKey: attachment?._dmhMediaKey || `${out.channelId}:${out.id}:${attachment?.id || index}`
@@ -444,29 +466,34 @@ function mergeImportedRecord(existing, incomingRaw) {
 
   const chosenCurrent = incomingIsNewerImportedCopy ? incoming : existing;
   const otherCurrent = incomingIsNewerImportedCopy ? existing : incoming;
+  const localImport = existing.importSource === "local-discord-exporter" || incoming.importSource === "local-discord-exporter";
+  const explicitLocalEdit = existing.importExplicitEdit === true || incoming.importExplicitEdit === true;
   let history = mergeImportHistories(existing.editHistory, incoming.editHistory);
+  if (localImport) {
+    history = explicitLocalEdit
+      ? history.filter(item => item?.importExplicitEdit === true)
+      : [];
+  }
 
   const existingContent = normalizeImportText(existing.content ?? "");
   const incomingContent = normalizeImportText(incoming.content ?? "");
   const existingAttachments = Array.isArray(existing.attachments) ? existing.attachments : [];
   const incomingAttachments = Array.isArray(incoming.attachments) ? incoming.attachments : [];
   const sameSnapshot = existingExportTime && incomingExportTime && existingExportTime === incomingExportTime;
-  const hasExplicitEditEvidence = Boolean(
-    (Array.isArray(existing.editHistory) && existing.editHistory.length) ||
-    (Array.isArray(incoming.editHistory) && incoming.editHistory.length) ||
-    existing.editedTimestamp || incoming.editedTimestamp
-  );
-  if (!sameSnapshot && (existingContent !== incomingContent || importAttachmentSignature(existingAttachments) !== importAttachmentSignature(incomingAttachments))) {
-    const shouldSynthesizeHistorical = hasExplicitEditEvidence || (existingImportedOnly && incoming.importedOnly === true);
-    if (shouldSynthesizeHistorical) {
-      const historical = {
-        content: otherCurrent.content ?? "",
-        attachments: Array.isArray(otherCurrent.attachments) ? otherCurrent.attachments : [],
-        editedAt: chosenCurrent.importExportedAt || incoming.importExportedAt || existing.importExportedAt || null,
-        capturedAt: importTimestamp(otherCurrent.importExportedAt) || Number(otherCurrent.lastSeenAt || 0) || Date.now()
-      };
-      history = mergeImportHistories(history, [historical]);
-    }
+  const textMeaningfullyChanged = Boolean(existingContent && incomingContent && existingContent !== incomingContent);
+  // Do not infer an edit merely because two exports rendered the same media in
+  // different ways. Only derive a historical version when the actual textual
+  // message body differs between snapshots. Explicit edit-history entries parsed
+  // from an exporter are already merged above and do not need a synthetic copy.
+  if (!localImport && !sameSnapshot && textMeaningfullyChanged) {
+    const historical = {
+      content: otherCurrent.content ?? "",
+      attachments: Array.isArray(otherCurrent.attachments) ? otherCurrent.attachments : [],
+      editedAt: chosenCurrent.importExportedAt || incoming.importExportedAt || existing.importExportedAt || null,
+      capturedAt: importTimestamp(otherCurrent.importExportedAt) || Number(otherCurrent.lastSeenAt || 0) || Date.now(),
+      syntheticImport: true
+    };
+    history = mergeImportHistories(history, [historical]);
   }
 
   const merged = { ...incoming, ...existing, ...chosenCurrent };
@@ -476,6 +503,22 @@ function mergeImportedRecord(existing, incomingRaw) {
   merged.author = mergeImportAuthor(existing.author, incoming.author);
   merged.deleted = Boolean(existing.deleted || incoming.deleted);
   merged.deletedAt = existing.deletedAt || incoming.deletedAt || null;
+  if (localImport) merged.importExplicitEdit = explicitLocalEdit;
+  if (!textMeaningfullyChanged) {
+    // Prefer a non-empty text/link representation and the richer attachment set
+    // when imports disagree only because media previews were enabled/disabled.
+    if (!normalizeImportText(merged.content) && existingContent) merged.content = existing.content;
+    if (!normalizeImportText(merged.content) && incomingContent) merged.content = incoming.content;
+    const existingAttachmentCount = Array.isArray(existing.attachments) ? existing.attachments.length : 0;
+    const incomingAttachmentCount = Array.isArray(incoming.attachments) ? incoming.attachments.length : 0;
+    if (existingAttachmentCount > incomingAttachmentCount) merged.attachments = existing.attachments;
+    else if (incomingAttachmentCount > existingAttachmentCount) merged.attachments = incoming.attachments;
+    const linkMap = new Map();
+    for (const link of [...(Array.isArray(existing.links) ? existing.links : []), ...(Array.isArray(incoming.links) ? incoming.links : [])]) {
+      if (link?.url) linkMap.set(String(link.url), link);
+    }
+    if (linkMap.size) merged.links = [...linkMap.values()];
+  }
   const currentSignature = importHistorySignature({ content: merged.content || "", attachments: merged.attachments || [] });
   merged.editHistory = history.filter(item => importHistorySignature(item) !== currentSignature);
   merged.firstSeenAt = Math.min(...[existing.firstSeenAt, incoming.firstSeenAt].map(Number).filter(Number.isFinite).filter(value => value > 0), Date.now());
@@ -491,6 +534,41 @@ function mergeImportedRecord(existing, incomingRaw) {
   merged.snapshotHtml = existing.snapshotHtml || incoming.snapshotHtml || null;
   merged.channelMeta = { ...(incoming.channelMeta || {}), ...(existing.channelMeta || {}) };
   return merged;
+}
+
+async function repairLegacyLocalImportEdits() {
+  let db;
+  try { db = await openExportDb(); } catch { return { repaired: 0 }; }
+  const tx = db.transaction("messages", "readwrite");
+  const store = tx.objectStore("messages");
+  const records = await idbRequest(store.getAll());
+  let repaired = 0;
+  for (const record of records) {
+    if (record?.importSource !== "local-discord-exporter" || !Array.isArray(record.editHistory) || !record.editHistory.length) continue;
+    const original = record.editHistory;
+    const currentSemantic = normalizeImportedSemanticText(record.content || "");
+    const byKey = new Map();
+    for (const item of original) {
+      if (!item) continue;
+      const text = normalizeImportText(item.content || "");
+      const semantic = normalizeImportedSemanticText(text);
+      if (isImportPlaceholderText(text)) continue;
+      // Presentation-only differences: same words with/without inline emoji,
+      // or same message body with a different attachment/preview state.
+      if (currentSemantic && semantic === currentSemantic) continue;
+      const time = importTimestamp(item.editedAt);
+      const key = time ? `t:${time}` : `s:${semantic}\n${importAttachmentSignature(item.attachments || [])}`;
+      if (!byKey.has(key)) byKey.set(key, item);
+    }
+    let cleaned = [...byKey.values()];
+    if (record.importExplicitEdit === false) cleaned = [];
+    if (cleaned.length !== original.length || cleaned.some((item, i) => item !== original[i])) {
+      store.put({ ...record, editHistory: cleaned });
+      repaired += 1;
+    }
+  }
+  await idbTxDone(tx);
+  return { repaired };
 }
 
 function mergeImportedChannel(existing, incoming) {
@@ -637,6 +715,7 @@ async function runImportFiles(files, kind) {
       }
     }
 
+    await repairLegacyLocalImportEdits().catch(() => {});
     await Promise.allSettled([loadChats(), loadStats()]);
     const successfulFiles = list.length - failures.length;
     const summary = [
@@ -751,6 +830,7 @@ function getExportOptions() {
   return {
     deleted: document.getElementById("exportDeleted").checked,
     edits: document.getElementById("exportEdits").checked,
+    omitEmpty: document.getElementById("exportOmitEmpty").checked,
     images: document.getElementById("exportImages").checked,
     media: document.getElementById("exportMedia").checked,
     files: document.getElementById("exportFiles").checked,
@@ -884,8 +964,11 @@ function exportIsoTime(value, fallbackSnowflake) {
   return date && !Number.isNaN(date.getTime()) ? date.toISOString() : "";
 }
 
-function portableExportRecord(record) {
-  return JSON.parse(JSON.stringify(record || {}, (key, value) => {
+function portableExportRecord(record, options = null) {
+  const source = { ...(record || {}) };
+  if (options?.edits) source.editHistory = visibleExportEditHistory(record, options);
+  else if (options && !options.edits) source.editHistory = [];
+  return JSON.parse(JSON.stringify(source, (key, value) => {
     if (key === "snapshotHtml") return undefined;
     // Avatar data URLs can be large and are already embedded in the visible HTML.
     // Keep ordinary Discord avatar URLs in metadata, but do not duplicate inline
@@ -919,9 +1002,37 @@ function renderReply(record) {
   return `<div class="reply"><span>${escapeHtml(author)}</span>${linkifyText(String(content).slice(0, 240))}</div>`;
 }
 
+function visibleExportEditHistory(record, options) {
+  if (!options?.edits || !Array.isArray(record?.editHistory)) return [];
+  const currentText = normalizeImportText(record.content || "");
+  const currentAttachmentSig = importAttachmentSignature(record.attachments || []);
+  const latestRealEdit = importTimestamp(record.editedTimestamp);
+  const byKey = new Map();
+  for (const edit of record.editHistory) {
+    if (!edit) continue;
+    const text = normalizeImportText(edit.content || "");
+    const attachments = Array.isArray(edit.attachments) ? edit.attachments : [];
+    // The optional empty-message cleanup also hides old presentation-only
+    // revisions which produced [empty message] or [attachment changed].
+    if (options.omitEmpty && isImportPlaceholderText(text)) continue;
+    if (text === currentText && importAttachmentSignature(attachments) === currentAttachmentSig) continue;
+    if (record.importSource === "local-discord-exporter" && record.importExplicitEdit !== true) {
+      const currentSemantic = normalizeImportedSemanticText(currentText);
+      const editSemantic = normalizeImportedSemanticText(text);
+      if (isImportPlaceholderText(text) || (currentSemantic && editSemantic === currentSemantic)) continue;
+    }
+    const editedAt = importTimestamp(edit.editedAt);
+    if (latestRealEdit && editedAt && editedAt > latestRealEdit + 1000) continue;
+    const key = editedAt ? `t:${editedAt}` : `s:${importHistorySignature(edit)}`;
+    if (!byKey.has(key)) byKey.set(key, edit);
+  }
+  return [...byKey.values()];
+}
+
 function renderEditHistory(record, options) {
-  if (!options.edits || !Array.isArray(record.editHistory) || !record.editHistory.length) return "";
-  return `<div class="edit-history">${record.editHistory.map(edit => {
+  const history = visibleExportEditHistory(record, options);
+  if (!history.length) return "";
+  return `<div class="edit-history">${history.map(edit => {
     const text = edit.content || (Array.isArray(edit.attachments) && edit.attachments.length ? "[attachment changed]" : "[empty message]");
     const editedAt = exportIsoTime(edit.editedAt || edit.capturedAt);
     return `<div class="edit-version"${editedAt ? ` data-edited-at="${escapeHtml(editedAt)}"` : ""}><div class="edit-version-content">${linkifyText(text)}</div><div class="edit-version-time">${editedAt ? `<time datetime="${escapeHtml(editedAt)}">${escapeHtml(formatExportTime(editedAt))}</time>` : escapeHtml(formatExportTime(edit.editedAt || edit.capturedAt))}</div></div>`;
@@ -1071,10 +1182,26 @@ function renderCallIcon() {
   return `<span class="call-event-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M7.2 3.5c.5-.2 1.1 0 1.4.5l1.5 3.2c.2.5.1 1-.3 1.4L8.3 10c1.1 2.3 3 4.2 5.3 5.3l1.4-1.5c.4-.4.9-.5 1.4-.3l3.2 1.5c.5.3.7.9.5 1.4l-1 3c-.2.6-.8 1-1.4 1C10 20.4 3.6 14 3.6 6.3c0-.6.4-1.2 1-1.4l2.6-1.4Z" fill="currentColor"/></svg></span>`;
 }
 
+function exportMessageHasMeaningfulContent(record, options, preservedLinks = null) {
+  if (!record) return false;
+  if (isCallRecord(record)) return true;
+  if (String(record.content || "").trim()) return true;
+  const links = preservedLinks || messageLinks(record);
+  if (links.length) return true;
+  if (Array.isArray(record.attachments) && record.attachments.length) return true;
+  if (Array.isArray(record.embeds) && record.embeds.length) return true;
+  if (Array.isArray(record.stickers) && record.stickers.length) return true;
+  if (record.poll) return true;
+  if (Array.isArray(record.reactions) && record.reactions.length) return true;
+  if (record.thread) return true;
+  if (visibleExportEditHistory(record, options).length) return true;
+  return false;
+}
+
 function renderMessage(record, options, mediaMap, threadMap = new Map(), avatarMap = new Map()) {
   if (record.deleted && !options.deleted) return "";
-  const edited = Array.isArray(record.editHistory) && record.editHistory.length;
-  const editedVisible = Boolean(options.edits && edited);
+  const visibleHistory = visibleExportEditHistory(record, options);
+  const editedVisible = visibleHistory.length > 0;
   const callEvent = isCallRecord(record);
   const classes = ["message", callEvent ? "call-event" : "", record.deleted ? "deleted" : "", editedVisible ? "edited" : ""].filter(Boolean).join(" ");
   const author = exportAuthorName(record);
@@ -1088,14 +1215,12 @@ function renderMessage(record, options, mediaMap, threadMap = new Map(), avatarM
   const status = `${record.deleted ? '<span class="status deleted-status">DELETED</span>' : ""}${editedVisible ? '<span class="status edited-status">EDITED</span>' : ""}`;
   const bodyText = callEvent ? "" : (record.content ? linkifyText(record.content) : "");
   const preservedLinks = callEvent ? [] : messageLinks(record);
+  if (options.omitEmpty && !exportMessageHasMeaningfulContent(record, options, preservedLinks)) return "";
   const preservedLinksHtml = renderMessageLinks(preservedLinks);
   const callDisplayText = callEvent ? exportCallText(record) : "";
   const callBody = callEvent ? `<div class="call-event-content">${renderCallIcon()}<span>${escapeHtml(callDisplayText)}</span></div>` : "";
-  const hasNonTextContent = Boolean(
-    record.attachments?.length || record.embeds?.length || record.stickers?.length || record.poll ||
-    record.reactions?.length || record.thread || preservedLinks.length
-  );
-  const emptyNotice = !callEvent && !record.content && !hasNonTextContent ? '<span class="empty-message">[empty or unavailable message]</span>' : "";
+  const hasMeaningfulContent = exportMessageHasMeaningfulContent(record, options, preservedLinks);
+  const emptyNotice = !hasMeaningfulContent ? '<span class="empty-message">[empty or unavailable message]</span>' : "";
   const embeds = Array.isArray(record.embeds) ? record.embeds.map(renderEmbed).join("") : "";
   const stickers = Array.isArray(record.stickers) && record.stickers.length ? `<div class="stickers">${record.stickers.map(sticker => `<span>Sticker: ${escapeHtml(sticker?.name || sticker?.id || "sticker")}</span>`).join("")}</div>` : "";
   const timestampIso = exportIsoTime(record.timestamp, record.id);
@@ -1145,11 +1270,11 @@ function renderExportHtml(chat, messages, threads, options, mediaMap, avatarMap)
   const portable = {
     format: "discord-message-memory-export",
     formatVersion: 1,
-    extensionVersion: "1.3.0",
+    extensionVersion: "1.3.12",
     exportedAt: exportedAtIso,
     chat: { ...chat },
-    messages: messages.map(portableExportRecord),
-    threads: threads.map(thread => ({ meta: { ...thread.meta }, messages: thread.messages.map(portableExportRecord) }))
+    messages: messages.map(message => portableExportRecord(message, options)),
+    threads: threads.map(thread => ({ meta: { ...thread.meta }, messages: thread.messages.map(message => portableExportRecord(message, options)) }))
   };
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} - Discord export</title><script id="dmh-export-data" type="application/json">${safeScriptJson(portable)}</script><style>${exportDocumentCss()}</style></head>
@@ -1375,5 +1500,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 (async () => {
   await loadSettings();
+  await repairLegacyLocalImportEdits().catch(() => {});
   await Promise.allSettled([loadChats(), loadStats()]);
 })();

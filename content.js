@@ -320,8 +320,10 @@
     const ids = parseMessageElement(element);
     if (!ids) return;
 
-    if (element.dataset.dmhObserved !== "true") {
+    const lastSnapshotRequest = Number(element.dataset.dmhSnapshotRequestedAt || 0);
+    if (element.dataset.dmhObserved !== "true" || Date.now() - lastSnapshotRequest > 5000) {
       element.dataset.dmhObserved = "true";
+      element.dataset.dmhSnapshotRequestedAt = String(Date.now());
       const context = parseCurrentContext();
       postToPage("REQUEST_MESSAGE", {
         ...ids,
@@ -1141,7 +1143,7 @@
         if (data.record.attachments?.length) {
           sendBackground({ type: "DMH_CACHE_MESSAGE_ATTACHMENTS", channelId: data.record.channelId, id: data.record.id }).catch(() => {});
         }
-        if (eventType === "MESSAGE_UPDATE") {
+        if (eventType === "MESSAGE_UPDATE" || eventType === "MESSAGE_SNAPSHOT") {
           historyCache.delete(data.record.channelId);
           if (data.record.channelId === parseCurrentChannelId()) scheduleRefresh(true);
         }

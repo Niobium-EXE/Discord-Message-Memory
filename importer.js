@@ -22,6 +22,13 @@
     const clone = element.cloneNode(true);
     clone.querySelectorAll("br").forEach(node => node.replaceWith("\n"));
     clone.querySelectorAll(".empty-message").forEach(node => node.remove());
+    // Local Discord Exporter renders emoji as <img>. textContent drops the alt
+    // text, which made two visually identical messages compare as different
+    // snapshots and could manufacture fake edit history during import.
+    clone.querySelectorAll("img.inline-emoji, img.emoji, img[class*='emoji']").forEach(node => {
+      const alt = node.getAttribute("alt") || node.getAttribute("aria-label") || "";
+      node.replaceWith(clone.ownerDocument.createTextNode(alt));
+    });
     return String(clone.textContent || "").replace(/\u00a0/g, " ").trim();
   }
 
@@ -296,7 +303,8 @@
     return { attachments, media };
   }
 
-  function parseLocalEditHistory(element, fallbackTime) {
+  function parseLocalEditHistory(element, fallbackTime, explicitlyEdited) {
+    if (!explicitlyEdited) return [];
     const history = [];
     element.querySelectorAll(".edit-history-entry").forEach(entry => {
       const timeNode = entry.querySelector("time");
@@ -305,7 +313,8 @@
         content: textWithBreaks(entry.querySelector(".edit-history-content")),
         attachments: [],
         editedAt,
-        capturedAt: editedAt ? Date.parse(editedAt) || Date.now() : Date.now()
+        capturedAt: editedAt ? Date.parse(editedAt) || Date.now() : Date.now(),
+        importExplicitEdit: true
       });
     });
     return history;
@@ -325,7 +334,8 @@
     const timeNode = element.querySelector(":scope > .message-meta time, .message-meta time");
     const timestamp = timeNode?.getAttribute("datetime") || snowflakeIso(id);
     const deleted = element.getAttribute("data-deleted") === "true" || element.getAttribute("data-deleted-between-exports") === "true" || element.classList.contains("deleted-message") || element.classList.contains("between-export-deleted");
-    const editHistory = parseLocalEditHistory(element, context.exportedAt);
+    const explicitlyEdited = element.getAttribute("data-edited") === "true" || element.classList.contains("edited-message") || Boolean(element.querySelector(":scope > .message-meta .edited-badge, .edit-history-entry"));
+    const editHistory = parseLocalEditHistory(element, context.exportedAt, explicitlyEdited);
     const parentId = String(element.getAttribute("data-thread-parent-message-id") || "").trim();
     const threadName = String(element.getAttribute("data-thread-name") || "").trim();
 
@@ -340,6 +350,7 @@
       author: { username: authorName, ...(avatar ? { avatarUrl: avatar } : {}) },
       timestamp,
       editHistory,
+      importExplicitEdit: explicitlyEdited,
       deleted,
       deletedAt: deleted ? context.exportedAt : null,
       firstSeenAt: timestamp ? Date.parse(timestamp) || Date.now() : Date.now(),

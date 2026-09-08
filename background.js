@@ -217,6 +217,54 @@ function attachmentSignature(attachments) {
   })));
 }
 
+function normalizedMessageText(value) {
+  return String(value ?? "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/\u00a0/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function historyItemSignature(item) {
+  return `${normalizedMessageText(item?.content || "")}\n${attachmentSignature(item?.attachments || [])}`;
+}
+
+function cleanHistoryForLiveSnapshot(history, incoming, currentRecord) {
+  const items = Array.isArray(history) ? history : [];
+  const hasEditedField = Object.prototype.hasOwnProperty.call(incoming || {}, "editedTimestamp");
+  if (!hasEditedField) return items;
+
+  // A full MessageStore snapshot is authoritative: Discord keeps edited_timestamp
+  // on messages that have actually been edited. If it is null, imported visual
+  // differences (preview on/off, attachment card vs image, etc.) were not edits.
+  if (!incoming.editedTimestamp) return [];
+
+  const latestEdit = Date.parse(incoming.editedTimestamp || "");
+  const currentSignature = historyItemSignature({
+    content: currentRecord?.content || incoming?.content || "",
+    attachments: currentRecord?.attachments || incoming?.attachments || []
+  });
+  const byKey = new Map();
+  for (const item of items) {
+    if (!item) continue;
+    const itemTime = Date.parse(item.editedAt || "");
+    // Synthetic import revisions are timestamped at export/import time. Anything
+    // after Discord's latest real edit cannot be a genuine earlier revision.
+    if (Number.isFinite(latestEdit) && Number.isFinite(itemTime) && itemTime > latestEdit + 1000) continue;
+    const sig = historyItemSignature(item);
+    if (sig === currentSignature) continue;
+    const key = Number.isFinite(itemTime) ? `t:${itemTime}` : `s:${sig}`;
+    const old = byKey.get(key);
+    if (!old || normalizedMessageText(item.content).length > normalizedMessageText(old.content).length) byKey.set(key, item);
+  }
+  return [...byKey.values()].sort((a, b) => {
+    const aa = Date.parse(a.editedAt || "") || Number(a.capturedAt || 0);
+    const bb = Date.parse(b.editedAt || "") || Number(b.capturedAt || 0);
+    return aa - bb;
+  });
+}
+
 async function upsertChannelMeta(record) {
   if (!record?.channelId) return;
   const db = await openDb();
@@ -281,6 +329,9 @@ async function upsertMessage(incoming, eventType = "MESSAGE_CREATE") {
   merged.id = incoming.id;
   merged.firstSeenAt = old?.firstSeenAt || Date.now();
   merged.lastSeenAt = Date.now();
+  if (eventType === "MESSAGE_SNAPSHOT" && old) {
+    editHistory = cleanHistoryForLiveSnapshot(editHistory, incoming, merged);
+  }
   merged.editHistory = editHistory;
   merged.deleted = old?.deleted || Boolean(incoming.deleted);
   merged.deletedAt = incoming.deletedAt || old?.deletedAt || null;
