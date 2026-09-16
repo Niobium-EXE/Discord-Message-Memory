@@ -4,7 +4,11 @@ const DEFAULTS = {
   quickCss: "",
   hookStatus: null,
   storageStatus: null,
-  sidebarCollapsed: false
+  sidebarCollapsed: false,
+  notificationSoundEnabled: false,
+  notificationSoundDataUrl: "",
+  notificationSoundName: "",
+  notificationSoundVolume: 1
 };
 
 const EXPORT_DB_NAME = "discord-message-memory";
@@ -22,6 +26,14 @@ const confirmButton = document.getElementById("confirmButton");
 const hookPill = document.getElementById("hookPill");
 const appShell = document.querySelector(".app-shell");
 const sidebarToggle = document.getElementById("sidebarToggle");
+const notificationSoundEnabled = document.getElementById("notificationSoundEnabled");
+const notificationSoundFile = document.getElementById("notificationSoundFile");
+const chooseNotificationSound = document.getElementById("chooseNotificationSound");
+const testNotificationSound = document.getElementById("testNotificationSound");
+const clearNotificationSound = document.getElementById("clearNotificationSound");
+const notificationSoundStatus = document.getElementById("notificationSoundStatus");
+const notificationSoundVolume = document.getElementById("notificationSoundVolume");
+const notificationSoundVolumeValue = document.getElementById("notificationSoundVolumeValue");
 
 const exportDialog = document.getElementById("exportDialog");
 const exportTitle = document.getElementById("exportTitle");
@@ -106,7 +118,34 @@ async function loadSettings() {
   quickCss.value = data.quickCss || "";
   applySidebarState(Boolean(data.sidebarCollapsed));
   updateHookStatus(data.hookStatus);
+  notificationSoundEnabled.checked = Boolean(data.notificationSoundEnabled);
+  setNotificationSoundVolumeUi(data.notificationSoundVolume);
+  updateNotificationSoundUi(data.notificationSoundName || "", data.notificationSoundDataUrl || "");
 }
+
+function updateNotificationSoundUi(name, dataUrl) {
+  const hasSound = Boolean(dataUrl);
+  notificationSoundStatus.textContent = hasSound ? `${name || "Custom audio"} · stored locally` : "No custom sound selected.";
+  testNotificationSound.disabled = !hasSound;
+  clearNotificationSound.disabled = !hasSound;
+}
+
+function setNotificationSoundVolumeUi(value) {
+  const normalized = Math.max(0, Math.min(1, Number(value ?? 1)));
+  const percent = Math.round(normalized * 100);
+  notificationSoundVolume.value = String(percent);
+  notificationSoundVolumeValue.textContent = `${percent}%`;
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("Could not read audio file."));
+    reader.readAsDataURL(file);
+  });
+}
+
 
 async function loadStats() {
   const ids = ["messageCount", "channelCount", "mediaCount", "mediaBytes"];
@@ -822,7 +861,7 @@ function openExportDialog(chat) {
   exportSubtitle.textContent = `${formatNumber(chat.messageCount)} saved messages · ${formatBytes(chat.mediaBytes)} cached attachments`;
   resetExportProgress();
   startExportButton.disabled = false;
-  startExportButton.textContent = "Export HTML";
+  startExportButton.textContent = "Export MHTML";
   exportDialog.showModal();
 }
 
@@ -1270,7 +1309,7 @@ function renderExportHtml(chat, messages, threads, options, mediaMap, avatarMap)
   const portable = {
     format: "discord-message-memory-export",
     formatVersion: 1,
-    extensionVersion: "1.3.12",
+    extensionVersion: "1.3.14",
     exportedAt: exportedAtIso,
     chat: { ...chat },
     messages: messages.map(message => portableExportRecord(message, options)),
@@ -1371,6 +1410,97 @@ async function collectEmbeddedAvatars(allMessageGroups) {
   return avatarMap;
 }
 
+function bytesToBase64ForMhtml(bytes) {
+  let binary = "";
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) binary += String.fromCharCode(...bytes.subarray(i, i + step));
+  return btoa(binary);
+}
+
+function wrapBase64ForMhtml(value) {
+  const clean = String(value || "").replace(/\s+/g, "");
+  const lines = [];
+  for (let i = 0; i < clean.length; i += 76) lines.push(clean.slice(i, i + 76));
+  return lines.join("\r\n");
+}
+
+function parseExportDataUrl(dataUrl) {
+  const match = String(dataUrl || "").match(/^data:([^;,]*)(;base64)?,(.*)$/s);
+  if (!match) return null;
+  const contentType = match[1] || "application/octet-stream";
+  if (match[2]) return { contentType, base64: String(match[3] || "").replace(/\s+/g, "") };
+  try {
+    const bytes = new TextEncoder().encode(decodeURIComponent(match[3] || ""));
+    return { contentType, base64: bytesToBase64ForMhtml(bytes) };
+  } catch {
+    return null;
+  }
+}
+
+function extensionForMime(type) {
+  const map = {"image/png":"png","image/jpeg":"jpg","image/gif":"gif","image/webp":"webp","image/avif":"avif","image/svg+xml":"svg","video/mp4":"mp4","video/webm":"webm","audio/mpeg":"mp3","audio/ogg":"ogg","audio/wav":"wav","audio/mp4":"m4a","application/pdf":"pdf"};
+  return map[String(type || "").toLowerCase()] || "bin";
+}
+
+function htmlToMhtml(html, title) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const exportId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const rootLocation = `https://discord-message-memory.local/export/${exportId}/index.html`;
+  const resources = [];
+  const byDataUrl = new Map();
+  let resourceIndex = 0;
+  for (const element of doc.querySelectorAll('[src^="data:"],[href^="data:"]')) {
+    for (const attr of ["src", "href"]) {
+      const value = element.getAttribute(attr) || "";
+      if (!value.startsWith("data:")) continue;
+      let item = byDataUrl.get(value);
+      if (!item) {
+        const parsed = parseExportDataUrl(value);
+        if (!parsed) continue;
+        resourceIndex += 1;
+        const ext = extensionForMime(parsed.contentType);
+        const location = `https://discord-message-memory.local/export/${exportId}/resource/${resourceIndex}.${ext}`;
+        item = { location, contentType: parsed.contentType, base64: parsed.base64, filename: `resource-${resourceIndex}.${ext}` };
+        byDataUrl.set(value, item);
+        resources.push(item);
+      }
+      element.setAttribute(attr, item.location);
+    }
+  }
+  const htmlText = `<!doctype html>\n${doc.documentElement.outerHTML}`;
+  const htmlBase64 = bytesToBase64ForMhtml(new TextEncoder().encode(htmlText));
+  const boundary = `----=_DiscordMessageMemory_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  const cleanTitle = String(title || "Discord Message Memory export").replace(/[\r\n]+/g, " ");
+  const chunks = [
+    `From: <Saved by Discord Message Memory>`,
+    `MIME-Version: 1.0`,
+    `Date: ${new Date().toUTCString()}`,
+    `Subject: ${cleanTitle}`,
+    `Content-Type: multipart/related; type="text/html"; boundary="${boundary}"`,
+    `X-Discord-Message-Memory-Format: 1`,
+    ``,
+    `--${boundary}`,
+    `Content-Type: text/html; charset="utf-8"`,
+    `Content-Transfer-Encoding: base64`,
+    `Content-Location: ${rootLocation}`,
+    ``,
+    wrapBase64ForMhtml(htmlBase64)
+  ];
+  for (const resource of resources) {
+    chunks.push(
+      `--${boundary}`,
+      `Content-Type: ${resource.contentType}`,
+      `Content-Transfer-Encoding: base64`,
+      `Content-Location: ${resource.location}`,
+      `Content-Disposition: inline; filename="${resource.filename}"`,
+      ``,
+      wrapBase64ForMhtml(resource.base64)
+    );
+  }
+  chunks.push(`--${boundary}--`, ``);
+  return chunks.join("\r\n");
+}
+
 async function runExport() {
   if (!currentExportChat || exportRunning) return;
   exportRunning = true;
@@ -1387,14 +1517,15 @@ async function runExport() {
     const { mediaMap, missing } = await collectEmbeddedMedia(groups, options);
     const avatarMap = await collectEmbeddedAvatars(groups);
 
-    setExportProgress(1, 1, "Building standalone HTML…");
+    setExportProgress(1, 1, "Building single-file MHTML…");
     const html = renderExportHtml(currentExportChat, messages, threads, options, mediaMap, avatarMap);
-    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const mhtml = htmlToMhtml(html, `${displayChatName(currentExportChat)} - Discord Message Memory`);
+    const blob = new Blob([mhtml], { type: "multipart/related" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     const date = new Date().toISOString().slice(0, 10);
     anchor.href = url;
-    anchor.download = `${sanitizeFilename(displayChatName(currentExportChat))} - ${date}.html`;
+    anchor.download = `${sanitizeFilename(displayChatName(currentExportChat))} - ${date}.mhtml`;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -1484,6 +1615,66 @@ importMemoryButton.addEventListener("click", () => { if (!importRunning) importM
 importLocalInput.addEventListener("change", () => runImportFiles(importLocalInput.files, "local"));
 importMemoryInput.addEventListener("change", () => runImportFiles(importMemoryInput.files, "memory"));
 
+notificationSoundEnabled.addEventListener("change", async () => {
+  const data = await chrome.storage.local.get({ notificationSoundDataUrl: "" });
+  if (notificationSoundEnabled.checked && !data.notificationSoundDataUrl) {
+    notificationSoundEnabled.checked = false;
+    notificationSoundFile.click();
+    return;
+  }
+  await chrome.storage.local.set({ notificationSoundEnabled: notificationSoundEnabled.checked });
+});
+
+notificationSoundVolume.addEventListener("input", () => {
+  const percent = Math.max(0, Math.min(100, Number(notificationSoundVolume.value || 0)));
+  notificationSoundVolumeValue.textContent = `${Math.round(percent)}%`;
+});
+
+notificationSoundVolume.addEventListener("change", async () => {
+  const percent = Math.max(0, Math.min(100, Number(notificationSoundVolume.value || 0)));
+  await chrome.storage.local.set({ notificationSoundVolume: percent / 100 });
+});
+
+chooseNotificationSound.addEventListener("click", () => notificationSoundFile.click());
+notificationSoundFile.addEventListener("change", async () => {
+  const file = notificationSoundFile.files?.[0];
+  notificationSoundFile.value = "";
+  if (!file) return;
+  if (file.size > 8 * 1024 * 1024) {
+    notificationSoundStatus.textContent = "That audio file is too large. Choose one under 8 MB.";
+    return;
+  }
+  if (file.type && !file.type.startsWith("audio/")) {
+    notificationSoundStatus.textContent = "Choose an audio file.";
+    return;
+  }
+  try {
+    const dataUrl = await fileToDataUrl(file);
+    await chrome.storage.local.set({ notificationSoundDataUrl: dataUrl, notificationSoundName: file.name, notificationSoundEnabled: true });
+    notificationSoundEnabled.checked = true;
+    updateNotificationSoundUi(file.name, dataUrl);
+  } catch (error) {
+    notificationSoundStatus.textContent = `Could not save sound: ${String(error?.message || error)}`;
+  }
+});
+
+testNotificationSound.addEventListener("click", async () => {
+  const data = await chrome.storage.local.get({ notificationSoundDataUrl: "" });
+  if (!data.notificationSoundDataUrl) return;
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "DMH_PLAY_NOTIFICATION_SOUND" });
+    if (!result?.ok) throw new Error(result?.reason || "Playback failed");
+  } catch (error) {
+    notificationSoundStatus.textContent = `Could not play sound: ${String(error?.message || error)}`;
+  }
+});
+
+clearNotificationSound.addEventListener("click", async () => {
+  await chrome.storage.local.set({ notificationSoundEnabled: false, notificationSoundDataUrl: "", notificationSoundName: "" });
+  notificationSoundEnabled.checked = false;
+  updateNotificationSoundUi("", "");
+});
+
 chatSearch.addEventListener("input", renderChats);
 startExportButton.addEventListener("click", runExport);
 exportDialog.addEventListener("close", () => {
@@ -1496,6 +1687,11 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.rememberingEnabled) rememberToggle.checked = Boolean(changes.rememberingEnabled.newValue);
   if (changes.showingEnabled) showingToggle.checked = Boolean(changes.showingEnabled.newValue);
   if (changes.sidebarCollapsed) applySidebarState(Boolean(changes.sidebarCollapsed.newValue));
+  if (changes.notificationSoundEnabled) notificationSoundEnabled.checked = Boolean(changes.notificationSoundEnabled.newValue);
+  if (changes.notificationSoundVolume) setNotificationSoundVolumeUi(changes.notificationSoundVolume.newValue);
+  if (changes.notificationSoundDataUrl || changes.notificationSoundName) {
+    chrome.storage.local.get({ notificationSoundDataUrl: "", notificationSoundName: "" }).then(data => updateNotificationSoundUi(data.notificationSoundName, data.notificationSoundDataUrl));
+  }
 });
 
 (async () => {

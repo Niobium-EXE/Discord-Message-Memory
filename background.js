@@ -10,7 +10,11 @@ const DEFAULT_SETTINGS = {
   rememberingEnabled: true,
   showingEnabled: true,
   quickCss: "",
-  sidebarCollapsed: false
+  sidebarCollapsed: false,
+  notificationSoundEnabled: false,
+  notificationSoundDataUrl: "",
+  notificationSoundName: "",
+  notificationSoundVolume: 1
 };
 
 const ACTION_ICONS = {
@@ -56,6 +60,77 @@ async function syncHookActionIcon() {
     const data = await chrome.storage.local.get({ hookStatus: null });
     await setHookActionIcon(data.hookStatus || null);
   } catch {}
+}
+
+let offscreenAudioCreatePromise = null;
+
+async function ensureOffscreenAudioDocument() {
+  if (!chrome.offscreen?.createDocument) return false;
+  if (offscreenAudioCreatePromise) return offscreenAudioCreatePromise;
+  offscreenAudioCreatePromise = (async () => {
+    try {
+      if (chrome.offscreen.hasDocument) {
+        try {
+          if (await chrome.offscreen.hasDocument()) return true;
+        } catch {}
+      }
+      await chrome.offscreen.createDocument({
+        url: "offscreen.html",
+        reasons: ["AUDIO_PLAYBACK"],
+        justification: "Play the user's custom Discord notification sound."
+      });
+      return true;
+    } catch (error) {
+      const message = String(error?.message || error || "");
+      if (/single offscreen|already exists|only one offscreen/i.test(message)) return true;
+      return false;
+    } finally {
+      offscreenAudioCreatePromise = null;
+    }
+  })();
+  return offscreenAudioCreatePromise;
+}
+
+async function playCustomNotificationSound() {
+  const data = await chrome.storage.local.get({
+    notificationSoundEnabled: false,
+    notificationSoundDataUrl: "",
+    notificationSoundVolume: 1
+  });
+  if (!data.notificationSoundEnabled || !data.notificationSoundDataUrl) {
+    return { ok: false, reason: "not-configured" };
+  }
+  const ready = await ensureOffscreenAudioDocument();
+  if (!ready) return { ok: false, reason: "offscreen-unavailable" };
+  try {
+    // Do not make the offscreen document read chrome.storage directly. Some
+    // Chromium/Opera builds expose runtime to offscreen documents while storage
+    // is missing there. The service worker owns settings/storage and hands the
+    // already-loaded audio payload to the player instead.
+    let response = null;
+    let lastError = null;
+    // createDocument() may resolve a moment before offscreen.js has registered
+    // its message listener. Retry briefly so the first Test/notification after
+    // creation does not get lost in that startup race.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        response = await chrome.runtime.sendMessage({
+          target: "dmh-offscreen-audio",
+          type: "PLAY_CUSTOM_NOTIFICATION",
+          dataUrl: data.notificationSoundDataUrl,
+          volume: Math.max(0, Math.min(1, Number(data.notificationSoundVolume ?? 1)))
+        });
+        if (response) break;
+      } catch (error) {
+        lastError = error;
+      }
+      await new Promise(resolve => setTimeout(resolve, 60 * (attempt + 1)));
+    }
+    if (!response && lastError) throw lastError;
+    return response?.ok ? response : { ok: false, reason: response?.reason || "playback-failed" };
+  } catch (error) {
+    return { ok: false, reason: String(error?.message || error) };
+  }
 }
 
 let dbPromise;
@@ -760,6 +835,7 @@ syncHookActionIcon();
 setTimeout(() => reconnectOpenDiscordTabs(), 250);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.target === "dmh-offscreen-audio") return false;
   (async () => {
     switch (message?.type) {
       case "DMH_UPSERT_MESSAGE":
@@ -790,6 +866,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return getStats();
       case "DMH_STORAGE_HEALTH":
         return getStorageHealth();
+      case "DMH_PLAY_NOTIFICATION_SOUND":
+        return playCustomNotificationSound();
       case "DMH_ENSURE_MAIN_HOOK": {
         const tabId = sender?.tab?.id;
         if (!tabId) return { ok: false, reason: "no-tab" };

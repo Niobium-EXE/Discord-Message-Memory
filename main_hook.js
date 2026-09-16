@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const HOOK_INSTANCE_VERSION = "1.3.9";
+  const HOOK_INSTANCE_VERSION = "1.3.15";
   if (window.__DMH_MAIN_HOOK_VERSION__ === HOOK_INSTANCE_VERSION) return;
   window.__DMH_MAIN_HOOK_VERSION__ = HOOK_INSTANCE_VERSION;
 
@@ -30,6 +30,86 @@
   let hookMethod = "none";
   let lastProgressStatusAt = 0;
   const recentEvents = new Map();
+  let notificationSoundEnabled = false;
+  let notificationSoundConfigured = false;
+  const patchedSoundMethods = new WeakMap();
+  let notificationSoundPatchCount = 0;
+
+  function isMessageNotificationSound(args) {
+    const matches = value => {
+      value = String(value || "").toLowerCase();
+      return value === "message1" || /^message\d+$/.test(value) || value === "notification" || value === "notification1";
+    };
+    for (const arg of args || []) {
+      if (typeof arg === "string" && matches(arg)) return true;
+      if (arg && typeof arg === "object") {
+        for (const key of ["name", "sound", "soundName", "sound_name", "id"]) {
+          if (matches(safeGet(arg, key))) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function requestReplacementNotificationSound() {
+    if (!notificationSoundEnabled || !notificationSoundConfigured) return false;
+    try {
+      post("PLAY_NOTIFICATION_SOUND", { requestedAt: Date.now() });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function patchSoundMethod(target, method) {
+    if (!target || typeof safeGet(target, method) !== "function") return false;
+    let methods = patchedSoundMethods.get(target);
+    if (!methods) {
+      methods = new Set();
+      patchedSoundMethods.set(target, methods);
+    }
+    if (methods.has(method)) return false;
+    const original = target[method];
+    function dmhSoundWrapper(...args) {
+      if (notificationSoundEnabled && notificationSoundConfigured && isMessageNotificationSound(args)) {
+        if (requestReplacementNotificationSound()) return undefined;
+      }
+      return original.apply(this, args);
+    }
+    try {
+      Object.defineProperty(dmhSoundWrapper, "__dmhOriginal", { value: original });
+      target[method] = dmhSoundWrapper;
+      methods.add(method);
+      notificationSoundPatchCount += 1;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function installNotificationSoundPatches() {
+    captureWebpackRequire();
+    if (!webpackRequire?.c) return notificationSoundPatchCount;
+    const directMethods = ["playSound", "playNotificationSound", "playAudio"];
+    try {
+      for (const mod of Object.values(webpackRequire.c)) {
+        const exportsObject = safeGet(mod, "exports");
+        for (const candidate of candidatesFromExports(exportsObject)) {
+          if (!candidate || (typeof candidate !== "object" && typeof candidate !== "function")) continue;
+          for (const method of directMethods) patchSoundMethod(candidate, method);
+          const looksLikeSoundPlayer = typeof safeGet(candidate, "play") === "function" && (
+            typeof safeGet(candidate, "stop") === "function" ||
+            typeof safeGet(candidate, "stopAll") === "function" ||
+            typeof safeGet(candidate, "isPlaying") === "function" ||
+            typeof safeGet(candidate, "pause") === "function"
+          );
+          if (looksLikeSoundPlayer) patchSoundMethod(candidate, "play");
+        }
+      }
+    } catch {}
+    return notificationSoundPatchCount;
+  }
+
 
   // DM-only secondary tap. Discord can expose more than one Flux-like dispatcher
   // at runtime, and the dispatcher hanging off MessageStore is not always the one
@@ -1158,7 +1238,8 @@
       lastHookEventAt,
       messageStoreFound: Boolean(messageStore),
       channelStoreFound: Boolean(channelStore),
-      privateDmTapDispatchers: privateTapDispatcherCount
+      privateDmTapDispatchers: privateTapDispatcherCount,
+      notificationSoundPatches: notificationSoundPatchCount
     });
   }
 
@@ -1173,6 +1254,7 @@
     // discoverStores(true) resets subscribed and attaches them to the new one.
     subscribe();
     installPrivateDmTaps(false);
+    installNotificationSoundPatches();
     return hookIsConnected();
   }
 
@@ -1189,6 +1271,13 @@
   window.addEventListener("message", event => {
     if (event.source !== window || event.data?.source !== IN_SOURCE) return;
     const data = event.data;
+
+    if (data.type === "SET_NOTIFICATION_SOUND") {
+      notificationSoundEnabled = Boolean(data.enabled);
+      notificationSoundConfigured = Boolean(data.hasSound || data.dataUrl);
+      installNotificationSoundPatches();
+      return;
+    }
 
     if (data.type === "SET_LIVE_RESTORE_ENABLED") {
       liveRestoreEnabled = Boolean(data.enabled);

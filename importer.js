@@ -139,9 +139,15 @@
     const resources = new Map();
     for (const part of parts) {
       const location = String(part.headers["content-location"] || "").trim();
-      if (!location) continue;
-      resources.set(location, part);
-      try { resources.set(decodeURI(location), part); } catch {}
+      const contentId = String(part.headers["content-id"] || "").trim().replace(/^<|>$/g, "");
+      if (location) {
+        resources.set(location, part);
+        try { resources.set(decodeURI(location), part); } catch {}
+      }
+      if (contentId) {
+        resources.set(`cid:${contentId}`, part);
+        resources.set(contentId, part);
+      }
     }
     return { html: partText(htmlPart), resources, parts };
   }
@@ -447,7 +453,7 @@
     };
   }
 
-  function parseMessageMemoryAttachment(wrapper, record, index) {
+  function parseMessageMemoryAttachment(wrapper, record, index, resources = null) {
     let src = "";
     let filename = "";
     let contentType = "";
@@ -474,13 +480,14 @@
       contentType = guessContentType(filename);
     }
     if (!src) return null;
-    const blob = src.startsWith("data:") ? dataUrlToBlob(src) : null;
+    const resourcePart = resources ? resourceFor(resources, src) : null;
+    const blob = src.startsWith("data:") ? dataUrlToBlob(src) : (resourcePart ? partBlob(resourcePart) : null);
     const id = attachmentIdFromUrl(src);
     const key = wrapper.getAttribute("data-dmh-media-key") || mediaKey(record.channelId, record.id, id, index);
     const attachment = {
       id,
       filename: filename || `attachment-${index + 1}`,
-      url: src.startsWith("data:") ? null : src,
+      url: (src.startsWith("data:") || resourcePart) ? null : src,
       proxyUrl: null,
       contentType: blob?.type || contentType || "application/octet-stream",
       size: blob?.size || 0,
@@ -490,7 +497,7 @@
     return { attachment, media: makeMediaItem(record, attachment, index, blob) };
   }
 
-  function parseMessageMemoryDomRecord(element, channelId, channelMeta, exportedAt) {
+  function parseMessageMemoryDomRecord(element, channelId, channelMeta, exportedAt, resources = null) {
     const id = String(element.getAttribute("data-message-id") || element.id?.replace(/^message-/, "") || "").trim();
     if (!id) return null;
     const record = {
@@ -544,7 +551,7 @@
 
     const media = [];
     element.querySelectorAll(".attachment").forEach((wrapper, index) => {
-      const parsed = parseMessageMemoryAttachment(wrapper, record, index);
+      const parsed = parseMessageMemoryAttachment(wrapper, record, index, resources);
       if (!parsed) return;
       record.attachments.push(parsed.attachment);
       if (parsed.media) media.push(parsed.media);
@@ -581,10 +588,17 @@
   }
 
   async function parseMessageMemoryExportFile(file) {
-    const html = await file.text();
+    const raw = await file.text();
+    let html = raw;
+    let resources = null;
+    if (/^From:\s*<Saved by Discord Message Memory>/im.test(raw) || /Content-Type:\s*multipart\/related/i.test(raw)) {
+      const archive = parseMhtml(raw);
+      html = archive.html;
+      resources = archive.resources;
+    }
     const doc = new DOMParser().parseFromString(html, "text/html");
     const marker = doc.querySelector("#dmh-export-data") || [...doc.querySelectorAll(".export-meta")].some(node => /Discord Message Memory/i.test(node.textContent));
-    if (!marker) throw new Error("This does not look like a Discord Message Memory HTML export.");
+    if (!marker) throw new Error("This does not look like a Discord Message Memory export.");
 
     let portable = null;
     const portableNode = doc.querySelector("#dmh-export-data");
@@ -641,16 +655,19 @@
         if (panel) channelId = panel.getAttribute("data-thread-panel") || channelId;
         const record = recordByKey.get(`${channelId}:${id}`);
         if (!record) return;
-        const avatar = article.querySelector(".avatar img[src^='data:']")?.getAttribute("src");
-        if (avatar) record.author = { ...(record.author || {}), avatarUrl: avatar };
+        const avatarNode = article.querySelector(".avatar img[src]");
+        const avatar = avatarNode?.getAttribute("src") || "";
+        const avatarOrigin = article.querySelector(".avatar[data-dmh-avatar-origin]")?.getAttribute("data-dmh-avatar-origin") || "";
+        if (avatar.startsWith("data:")) record.author = { ...(record.author || {}), avatarUrl: avatar };
+        else if (avatarOrigin) record.author = { ...(record.author || {}), avatarUrl: avatarOrigin };
         article.querySelectorAll(".attachment[data-dmh-media-key]").forEach((wrapper, index) => {
-          const parsed = parseMessageMemoryAttachment(wrapper, record, index);
+          const parsed = parseMessageMemoryAttachment(wrapper, record, index, resources);
           if (parsed?.media) media.push(parsed.media);
         });
       });
     } else {
       doc.querySelectorAll("main .messages > article.message").forEach(article => {
-        const parsed = parseMessageMemoryDomRecord(article, mainChannelId, mainMeta, exportedAt);
+        const parsed = parseMessageMemoryDomRecord(article, mainChannelId, mainMeta, exportedAt, resources);
         if (!parsed) return;
         messages.push(parsed.record);
         media.push(...parsed.media);
@@ -662,7 +679,7 @@
         const threadMeta = { channelId: threadId, guildId: mainMeta.guildId, channelName: threadName, parentId: mainChannelId, isThread: true, channelType: 11, scope: mainMeta.guildId ? "server" : "private", lastSeenAt: mainMeta.lastSeenAt, importSource: "discord-message-memory-export" };
         channels.push(threadMeta);
         panel.querySelectorAll("article.message").forEach(article => {
-          const parsed = parseMessageMemoryDomRecord(article, threadId, threadMeta, exportedAt);
+          const parsed = parseMessageMemoryDomRecord(article, threadId, threadMeta, exportedAt, resources);
           if (!parsed) return;
           messages.push(parsed.record);
           media.push(...parsed.media);
@@ -677,7 +694,7 @@
       channels,
       messages,
       media,
-      warnings: portable ? [] : ["This is an older Message Memory HTML export, so some metadata that was not visible in the transcript may not be recoverable."]
+      warnings: portable ? [] : ["This is an older Message Memory export, so some metadata that was not visible in the transcript may not be recoverable."]
     };
   }
 

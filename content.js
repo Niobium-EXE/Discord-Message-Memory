@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const CONTENT_INSTANCE_VERSION = "1.3.8";
+  const CONTENT_INSTANCE_VERSION = "1.3.17";
   if (globalThis.__DMH_CONTENT_INSTANCE_VERSION__ === CONTENT_INSTANCE_VERSION) return;
   globalThis.__DMH_CONTENT_INSTANCE_VERSION__ = CONTENT_INSTANCE_VERSION;
 
@@ -10,7 +10,9 @@
   const SETTINGS_DEFAULTS = {
     rememberingEnabled: true,
     showingEnabled: true,
-    quickCss: ""
+    quickCss: "",
+    notificationSoundEnabled: false,
+    notificationSoundDataUrl: ""
   };
 
   let settings = { ...SETTINGS_DEFAULTS };
@@ -1155,6 +1157,10 @@
     if (event.source !== window || event.data?.source !== PAGE_SOURCE) return;
     const data = event.data;
     if (data.type === "DISCORD_EVENT") handleDiscordEvent(data);
+    if (data.type === "PLAY_NOTIFICATION_SOUND") {
+      sendBackground({ type: "DMH_PLAY_NOTIFICATION_SOUND" }, false).catch(() => {});
+      return;
+    }
     if (data.type === "HOOK_STATUS") {
       lastHookStatusReceivedAt = Date.now();
       safeStorageSet({
@@ -1180,16 +1186,19 @@
     if (area !== "local") return;
     let visibilityChanged = false;
     let rememberingChanged = false;
+    let notificationSoundChanged = false;
 
     for (const key of Object.keys(SETTINGS_DEFAULTS)) {
       if (changes[key]) {
         settings[key] = changes[key].newValue ?? SETTINGS_DEFAULTS[key];
         if (key === "showingEnabled") visibilityChanged = true;
         if (key === "rememberingEnabled") rememberingChanged = true;
+        if (key === "notificationSoundEnabled" || key === "notificationSoundDataUrl") notificationSoundChanged = true;
       }
     }
 
     if (changes.quickCss) applyQuickCss();
+    if (notificationSoundChanged) postToPage("SET_NOTIFICATION_SOUND", { enabled: Boolean(settings.notificationSoundEnabled), hasSound: Boolean(settings.notificationSoundDataUrl) });
     if (visibilityChanged || rememberingChanged) {
       postToPage("SET_LIVE_RESTORE_ENABLED", { enabled: Boolean(settings.rememberingEnabled && settings.showingEnabled) });
     }
@@ -1215,6 +1224,7 @@
     // first capture burst. This also repairs malformed v1 databases in-place.
     sendBackground({ type: "DMH_STORAGE_HEALTH" }).catch(() => {});
     postToPage("SET_LIVE_RESTORE_ENABLED", { enabled: Boolean(settings.rememberingEnabled && settings.showingEnabled) });
+    postToPage("SET_NOTIFICATION_SOUND", { enabled: Boolean(settings.notificationSoundEnabled), hasSound: Boolean(settings.notificationSoundDataUrl) });
     postToPage("PING_HOOK");
     postToPage("REQUEST_EVENT_BACKLOG");
 
