@@ -17,6 +17,16 @@ const DEFAULT_SETTINGS = {
   notificationSoundVolume: 1
 };
 
+let chatListCache = null;
+let chatListCacheAt = 0;
+let chatListBuildPromise = null;
+const CHAT_LIST_CACHE_MS = 15_000;
+
+function invalidateChatListCache() {
+  chatListCache = null;
+  chatListCacheAt = 0;
+}
+
 const ACTION_ICONS = {
   off: {
     16: "icon16.png",
@@ -360,9 +370,17 @@ async function upsertChannelMeta(record) {
     parentId: meta.parentId || old?.parentId || null,
     isThread: meta.isThread ?? old?.isThread ?? false,
     scope: meta.scope || record.channelScope || old?.scope || (record.guildId ? "server" : "private"),
-    lastSeenAt: Date.now()
+    lastSeenAt: Date.now(),
+    summaryMessageCount: old?.summaryMessageCount ?? null,
+    summaryDeletedCount: old?.summaryDeletedCount ?? null,
+    summaryEditedCount: old?.summaryEditedCount ?? null,
+    summaryMediaCount: old?.summaryMediaCount ?? null,
+    summaryMediaBytes: old?.summaryMediaBytes ?? null,
+    summaryUpdatedAt: old?.summaryUpdatedAt || null,
+    summaryDirty: true
   });
   await txDone(tx);
+  invalidateChatListCache();
 }
 
 async function getMessage(channelId, messageId) {
@@ -633,23 +651,101 @@ async function cacheAttachments(record) {
   const attachments = Array.isArray(record?.attachments) ? record.attachments : [];
   if (!attachments.length) return;
   await Promise.allSettled(attachments.map(attachment => cacheSingleAttachment(record, attachment)));
+  invalidateChatListCache();
 }
 
-async function listChats() {
+async function listChannelsFast() {
   const db = await openDb();
-  const [messages, channels, media] = await Promise.all([
-    requestToPromise(db.transaction("messages", "readonly").objectStore("messages").getAll()),
-    requestToPromise(db.transaction("channels", "readonly").objectStore("channels").getAll()),
-    requestToPromise(db.transaction("media", "readonly").objectStore("media").getAll())
-  ]);
+  const tx = db.transaction("channels", "readonly");
+  const channels = await requestToPromise(tx.objectStore("channels").getAll());
+  return channels
+    .map(channel => ({
+      ...channel,
+      messageCount: Number(channel.summaryMessageCount || 0),
+      deletedCount: Number(channel.summaryDeletedCount || 0),
+      editedCount: Number(channel.summaryEditedCount || 0),
+      mediaCount: Number(channel.summaryMediaCount || 0),
+      mediaBytes: Number(channel.summaryMediaBytes || 0),
+      summaryPending: Boolean(channel.summaryDirty || !channel.summaryUpdatedAt)
+    }))
+    .sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
+}
 
-  const channelMeta = new Map(channels.map(item => [item.channelId, item]));
+function cursorToPromise(request, onValue) {
+  return new Promise((resolve, reject) => {
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve();
+        return;
+      }
+      try {
+        onValue(cursor.value);
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      cursor.continue();
+    };
+  });
+}
+
+async function persistChatSummaries(channels, aggregates) {
+  const db = await openDb();
+  const tx = db.transaction("channels", "readwrite");
+  const store = tx.objectStore("channels");
+  const now = Date.now();
+  const allIds = new Set([...channels.keys(), ...aggregates.keys()]);
+  for (const channelId of allIds) {
+    const old = channels.get(channelId) || { channelId };
+    const agg = aggregates.get(channelId) || {
+      messageCount: 0,
+      deletedCount: 0,
+      editedCount: 0,
+      mediaCount: 0,
+      mediaBytes: 0,
+      lastSeenAt: Number(old.lastSeenAt || 0),
+      guildId: old.guildId || null,
+      scope: old.scope || (old.guildId ? "server" : "private"),
+      authorNames: [],
+      authorIds: []
+    };
+    store.put({
+      ...old,
+      channelId,
+      guildId: old.guildId || agg.guildId || null,
+      scope: old.scope || agg.scope || (agg.guildId ? "server" : "private"),
+      lastSeenAt: Math.max(Number(old.lastSeenAt || 0), Number(agg.lastSeenAt || 0)),
+      summaryMessageCount: Number(agg.messageCount || 0),
+      summaryDeletedCount: Number(agg.deletedCount || 0),
+      summaryEditedCount: Number(agg.editedCount || 0),
+      summaryMediaCount: Number(agg.mediaCount || 0),
+      summaryMediaBytes: Number(agg.mediaBytes || 0),
+      summaryUpdatedAt: now,
+      summaryDirty: false
+    });
+  }
+  await txDone(tx);
+}
+
+async function buildChatList() {
+  const db = await openDb();
+  const channelTx = db.transaction("channels", "readonly");
+  const channelRows = await requestToPromise(channelTx.objectStore("channels").getAll());
+  const channelMeta = new Map(channelRows.map(item => [String(item.channelId), item]));
   const aggregates = new Map();
 
-  for (const record of messages) {
-    if (!aggregates.has(record.channelId)) {
-      aggregates.set(record.channelId, {
-        channelId: record.channelId,
+  // Use cursors instead of getAll(). getAll() cloned every message and every
+  // cached Blob into one giant array before the settings page could render.
+  // A cursor keeps memory bounded and lets Chromium yield between records.
+  const msgTx = db.transaction("messages", "readonly");
+  await cursorToPromise(msgTx.objectStore("messages").openCursor(), record => {
+    const channelId = String(record.channelId || "");
+    if (!channelId) return;
+    if (!aggregates.has(channelId)) {
+      aggregates.set(channelId, {
+        channelId,
         guildId: record.guildId || null,
         scope: record.channelScope || (record.guildId ? "server" : "private"),
         messageCount: 0,
@@ -662,30 +758,48 @@ async function listChats() {
         authorIds: []
       });
     }
-    const agg = aggregates.get(record.channelId);
+    const agg = aggregates.get(channelId);
     agg.messageCount += 1;
     if (record.deleted) agg.deletedCount += 1;
-    if (record.editHistory?.length) agg.editedCount += 1;
-    agg.lastSeenAt = Math.max(agg.lastSeenAt, record.lastSeenAt || record.firstSeenAt || 0);
+    if (Array.isArray(record.editHistory) && record.editHistory.length) agg.editedCount += 1;
+    agg.lastSeenAt = Math.max(agg.lastSeenAt, Number(record.lastSeenAt || record.firstSeenAt || 0));
     const author = record.author || {};
     const authorName = author.globalName || author.global_name || author.username || null;
     const authorId = author.id != null ? String(author.id) : null;
     if (authorName && !agg.authorNames.includes(authorName)) agg.authorNames.push(authorName);
     if (authorId && !agg.authorIds.includes(authorId)) agg.authorIds.push(authorId);
-  }
+  });
 
-  for (const item of media) {
-    const agg = aggregates.get(item.channelId);
-    if (!agg) continue;
-    if (item.blob) {
-      agg.mediaCount += 1;
-      agg.mediaBytes += item.blob.size || item.size || 0;
-    }
-  }
+  const mediaTx = db.transaction("media", "readonly");
+  await cursorToPromise(mediaTx.objectStore("media").openCursor(), item => {
+    const agg = aggregates.get(String(item.channelId || ""));
+    if (!agg || !item.blob) return;
+    agg.mediaCount += 1;
+    // Every media row already stores size separately. Prefer that so we do not
+    // need to inspect/read the Blob payload merely to calculate list totals.
+    agg.mediaBytes += Number(item.size || item.blob?.size || 0);
+  });
+
+  await persistChatSummaries(channelMeta, aggregates).catch(() => {});
 
   return [...aggregates.values()]
-    .map(agg => ({ ...agg, ...(channelMeta.get(agg.channelId) || {}) }))
+    .map(agg => ({ ...agg, ...(channelMeta.get(agg.channelId) || {}), summaryPending: false }))
     .sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
+}
+
+async function listChats() {
+  if (chatListCache && Date.now() - chatListCacheAt < CHAT_LIST_CACHE_MS) return chatListCache;
+  if (chatListBuildPromise) return chatListBuildPromise;
+  chatListBuildPromise = buildChatList()
+    .then(result => {
+      chatListCache = result;
+      chatListCacheAt = Date.now();
+      return result;
+    })
+    .finally(() => {
+      chatListBuildPromise = null;
+    });
+  return chatListBuildPromise;
 }
 
 async function deleteChat(channelId) {
@@ -706,6 +820,7 @@ async function deleteChat(channelId) {
   const channelTx = db.transaction("channels", "readwrite");
   channelTx.objectStore("channels").delete(channelId);
   await txDone(channelTx);
+  invalidateChatListCache();
 
   return { ok: true, messagesDeleted: msgKeys.length, mediaDeleted: mediaKeys.length };
 }
@@ -717,6 +832,7 @@ async function deleteAllData() {
   tx.objectStore("media").clear();
   tx.objectStore("channels").clear();
   await txDone(tx);
+  invalidateChatListCache();
   return { ok: true };
 }
 
@@ -856,8 +972,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return getMessage(message.channelId, message.id);
       case "DMH_GET_CHANNEL_HISTORY":
         return getChannelHistory(message.channelId);
+      case "DMH_LIST_CHANNELS_FAST":
+        return listChannelsFast();
       case "DMH_LIST_CHATS":
         return listChats();
+      case "DMH_INVALIDATE_CHAT_CACHE":
+        invalidateChatListCache();
+        return { ok: true };
       case "DMH_DELETE_CHAT":
         return deleteChat(message.channelId);
       case "DMH_DELETE_ALL":

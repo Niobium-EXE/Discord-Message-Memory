@@ -250,7 +250,8 @@ function renderChats() {
 
     const meta = document.createElement("div");
     meta.className = "chat-meta";
-    meta.textContent = `${formatNumber(chat.messageCount)} messages · ${formatNumber(chat.deletedCount)} deleted · ${formatNumber(chat.editedCount)} edited · ${formatBytes(chat.mediaBytes)} files`;
+    const summaryText = `${formatNumber(chat.messageCount)} messages · ${formatNumber(chat.deletedCount)} deleted · ${formatNumber(chat.editedCount)} edited · ${formatBytes(chat.mediaBytes)} files`;
+    meta.textContent = chat.summaryPending ? `${summaryText} · updating…` : summaryText;
     info.appendChild(meta);
 
     const id = document.createElement("div");
@@ -294,10 +295,25 @@ function renderChats() {
 async function loadChats() {
   chatList.innerHTML = '<div class="empty-state">Loading saved chats…</div>';
   try {
+    // First paint uses only the tiny channels store. This makes hundreds of
+    // thousands of saved messages irrelevant to how quickly the chat list
+    // itself appears.
+    const quick = await sendBackground({ type: "DMH_LIST_CHANNELS_FAST" });
+    if (Array.isArray(quick) && quick.length) {
+      chats = quick;
+      renderChats();
+    }
+
+    // Exact message/deleted/edit/media counts are filled in by one shared
+    // background scan. DMH_GET_STATS reuses the same scan instead of starting
+    // another full pass over IndexedDB.
     const result = await sendBackground({ type: "DMH_LIST_CHATS" });
     chats = Array.isArray(result) ? result : [];
     renderChats();
   } catch (error) {
+    // Keep the lightweight list visible if only the detailed statistics pass
+    // failed. It is still useful for opening exports/deleting chats.
+    if (chats.length) return;
     chats = [];
     chatList.innerHTML = "";
     const item = document.createElement("div");
@@ -580,38 +596,57 @@ async function repairLegacyLocalImportEdits() {
   try { db = await openExportDb(); } catch { return { repaired: 0 }; }
   const tx = db.transaction("messages", "readwrite");
   const store = tx.objectStore("messages");
-  const records = await idbRequest(store.getAll());
   let repaired = 0;
-  for (const record of records) {
-    if (record?.importSource !== "local-discord-exporter" || !Array.isArray(record.editHistory) || !record.editHistory.length) continue;
-    const original = record.editHistory;
-    const currentSemantic = normalizeImportedSemanticText(record.content || "");
-    const byKey = new Map();
-    for (const item of original) {
-      if (!item) continue;
-      const text = normalizeImportText(item.content || "");
-      const semantic = normalizeImportedSemanticText(text);
-      if (isImportPlaceholderText(text)) continue;
-      // Presentation-only differences: same words with/without inline emoji,
-      // or same message body with a different attachment/preview state.
-      if (currentSemantic && semantic === currentSemantic) continue;
-      const time = importTimestamp(item.editedAt);
-      const key = time ? `t:${time}` : `s:${semantic}\n${importAttachmentSignature(item.attachments || [])}`;
-      if (!byKey.has(key)) byKey.set(key, item);
-    }
-    let cleaned = [...byKey.values()];
-    if (record.importExplicitEdit === false) cleaned = [];
-    if (cleaned.length !== original.length || cleaned.some((item, i) => item !== original[i])) {
-      store.put({ ...record, editHistory: cleaned });
-      repaired += 1;
-    }
-  }
+
+  // Cursor instead of getAll(): legacy repair can touch a very large history,
+  // but it no longer needs to allocate the whole message database at once.
+  await new Promise((resolve, reject) => {
+    const request = store.openCursor();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) { resolve(); return; }
+      const record = cursor.value;
+      if (record?.importSource === "local-discord-exporter" && Array.isArray(record.editHistory) && record.editHistory.length) {
+        const original = record.editHistory;
+        const currentSemantic = normalizeImportedSemanticText(record.content || "");
+        const byKey = new Map();
+        for (const item of original) {
+          if (!item) continue;
+          const text = normalizeImportText(item.content || "");
+          const semantic = normalizeImportedSemanticText(text);
+          if (isImportPlaceholderText(text)) continue;
+          if (currentSemantic && semantic === currentSemantic) continue;
+          const time = importTimestamp(item.editedAt);
+          const key = time ? `t:${time}` : `s:${semantic}\n${importAttachmentSignature(item.attachments || [])}`;
+          if (!byKey.has(key)) byKey.set(key, item);
+        }
+        let cleaned = [...byKey.values()];
+        if (record.importExplicitEdit === false) cleaned = [];
+        if (cleaned.length !== original.length || cleaned.some((item, i) => item !== original[i])) {
+          cursor.update({ ...record, editHistory: cleaned });
+          repaired += 1;
+        }
+      }
+      cursor.continue();
+    };
+  });
   await idbTxDone(tx);
   return { repaired };
 }
 
+async function runLegacyImportRepairOnce() {
+  const key = "legacyImportRepairVersion";
+  try {
+    const state = await chrome.storage.local.get({ [key]: 0 });
+    if (Number(state[key] || 0) >= 1318) return;
+    await repairLegacyLocalImportEdits();
+    await chrome.storage.local.set({ [key]: 1318 });
+  } catch {}
+}
+
 function mergeImportedChannel(existing, incoming) {
-  if (!existing) return { ...incoming, channelId: String(incoming.channelId), lastSeenAt: Number(incoming.lastSeenAt || 0) || Date.now() };
+  if (!existing) return { ...incoming, channelId: String(incoming.channelId), lastSeenAt: Number(incoming.lastSeenAt || 0) || Date.now(), summaryDirty: true };
   const union = (a, b) => uniqueNames([...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])]);
   return {
     ...incoming,
@@ -629,7 +664,8 @@ function mergeImportedChannel(existing, incoming) {
     isThread: Boolean(existing.isThread || incoming.isThread),
     scope: existing.scope || incoming.scope || (existing.guildId || incoming.guildId ? "server" : "private"),
     lastSeenAt: Math.max(Number(existing.lastSeenAt || 0), Number(incoming.lastSeenAt || 0), Date.now()),
-    importSource: existing.importSource || incoming.importSource || null
+    importSource: existing.importSource || incoming.importSource || null,
+    summaryDirty: true
   };
 }
 
@@ -755,6 +791,7 @@ async function runImportFiles(files, kind) {
     }
 
     await repairLegacyLocalImportEdits().catch(() => {});
+    await sendBackground({ type: "DMH_INVALIDATE_CHAT_CACHE" }).catch(() => {});
     await Promise.allSettled([loadChats(), loadStats()]);
     const successfulFiles = list.length - failures.length;
     const summary = [
@@ -1608,7 +1645,10 @@ document.getElementById("deleteAll").addEventListener("click", async () => {
   await Promise.all([loadChats(), loadStats()]);
 });
 
-document.getElementById("refreshChats").addEventListener("click", () => Promise.all([loadChats(), loadStats()]));
+document.getElementById("refreshChats").addEventListener("click", async () => {
+  await sendBackground({ type: "DMH_INVALIDATE_CHAT_CACHE" }).catch(() => {});
+  await Promise.all([loadChats(), loadStats()]);
+});
 
 importLocalButton.addEventListener("click", () => { if (!importRunning) importLocalInput.click(); });
 importMemoryButton.addEventListener("click", () => { if (!importRunning) importMemoryInput.click(); });
@@ -1696,6 +1736,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 (async () => {
   await loadSettings();
-  await repairLegacyLocalImportEdits().catch(() => {});
+  // Do not make a legacy import-repair scan block the settings page. Saved
+  // chats paint first; the one-time cleanup runs after the initial list/stats
+  // pass has finished.
   await Promise.allSettled([loadChats(), loadStats()]);
+  setTimeout(() => { runLegacyImportRepairOnce(); }, 250);
 })();
