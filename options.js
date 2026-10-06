@@ -867,6 +867,8 @@ function openExportDialog(chat) {
   exportSubtitle.textContent = `${formatNumber(chat.messageCount)} saved messages · ${formatBytes(chat.mediaBytes)} cached attachments`;
   resetExportProgress();
   startExportButton.disabled = false;
+  const exportAdvanced = document.getElementById("exportAdvanced");
+  if (exportAdvanced) exportAdvanced.open = false;
   updateExportFormatUi();
   exportDialog.showModal();
 }
@@ -1401,7 +1403,7 @@ function renderExportHtml(chat, messages, threads, options, mediaMap, avatarMap)
   const portable = {
     format: "discord-message-memory-export",
     formatVersion: 1,
-    extensionVersion: "1.3.23",
+    extensionVersion: "1.4",
     exportedAt: exportedAtIso,
     chat: { ...chat },
     messages: messages.map(message => portableExportRecord(message, options)),

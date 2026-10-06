@@ -211,60 +211,71 @@
         <button id="exportClose" class="icon-button" value="cancel" type="submit" aria-label="Close export settings">×</button>
       </div>
 
-      <div class="export-format-row">
-        <label for="exportFormat">Export format</label>
-        <select id="exportFormat">
-          <option value="html" selected>Interactive HTML — one file, full search</option>
-          <option value="mhtml">MHTML — one file, AV-friendly</option>
-        </select>
-        <p id="exportFormatHelp">Interactive HTML is one file and includes live message search plus filter tabs. The filters also have a script-free fallback, so they still work if page JavaScript is blocked.</p>
-      </div>
+      <details id="exportAdvanced" class="export-advanced">
+        <summary class="export-advanced-summary">
+          <div>
+            <strong>Advanced export options</strong>
+            <span>Format, message history, embedded media, files, and threads</span>
+          </div>
+          <span class="export-advanced-chevron" aria-hidden="true"></span>
+        </summary>
+        <div class="export-advanced-content">
+          <div class="export-format-row">
+            <label for="exportFormat">Export format</label>
+            <select id="exportFormat">
+              <option value="html" selected>Interactive HTML — one file, full search</option>
+              <option value="mhtml">MHTML — one file, AV-friendly</option>
+            </select>
+            <p id="exportFormatHelp">Interactive HTML is one file and includes live message search plus filter tabs. The filters also have a script-free fallback, so they still work if page JavaScript is blocked.</p>
+          </div>
 
-      <div class="export-options">
-        <label class="export-option">
-          <input id="exportDeleted" type="checkbox" checked>
-          <span class="export-check"></span>
-          <span>Deleted messages</span>
-          <span class="info-tip" tabindex="0" data-tip="Include messages Message Memory saw before they were deleted. Deleted rows are styled red in the export.">i</span>
-        </label>
-        <label class="export-option">
-          <input id="exportEdits" type="checkbox" checked>
-          <span class="export-check"></span>
-          <span>Edit history</span>
-          <span class="info-tip" tabindex="0" data-tip="Include saved previous versions of edited messages. Edited rows and prior versions are styled yellow.">i</span>
-        </label>
-        <label class="export-option">
-          <input id="exportOmitEmpty" type="checkbox">
-          <span class="export-check"></span>
-          <span>Omit empty/unavailable messages</span>
-          <span class="info-tip" tabindex="0" data-tip="Completely remove messages that have no saved text, links, attachments, embeds, stickers, polls, reactions, threads, call data, or visible edit history. Link-only GIF/image messages are not considered empty.">i</span>
-        </label>
-        <label class="export-option">
-          <input id="exportImages" type="checkbox" checked>
-          <span class="export-check"></span>
-          <span>Embed images</span>
-          <span class="info-tip" tabindex="0" data-tip="Include cached image attachments inside the selected one-file export when Message Memory has the file saved.">i</span>
-        </label>
-        <label class="export-option">
-          <input id="exportMedia" type="checkbox" checked>
-          <span class="export-check"></span>
-          <span>Embed video & audio</span>
-          <span class="info-tip" tabindex="0" data-tip="Include cached videos, audio, and voice-message files inside the selected one-file export. Large media can make the export very large.">i</span>
-        </label>
-        <label class="export-option">
-          <input id="exportFiles" type="checkbox">
-          <span class="export-check"></span>
-          <span>Embed other files</span>
-          <span class="info-tip" tabindex="0" data-tip="Embed other cached attachment types inside the selected export instead of linking back to Discord's CDN.">i</span>
-        </label>
-        <label class="export-option advanced-option">
-          <input id="exportThreads" type="checkbox">
-          <span class="export-check"></span>
-          <span>Saved threads</span>
-          <span class="advanced-label">ADVANCED</span>
-          <span class="info-tip" tabindex="0" data-tip="Include saved child threads when Message Memory knows their parent channel. Interactive HTML uses the side drawer; MHTML uses script-free thread links.">i</span>
-        </label>
-      </div>
+          <div class="export-options">
+            <label class="export-option">
+              <input id="exportDeleted" type="checkbox" checked>
+              <span class="export-check"></span>
+              <span>Deleted messages</span>
+              <span class="info-tip" tabindex="0" data-tip="Include messages Message Memory saw before they were deleted. Deleted rows are styled red in the export.">i</span>
+            </label>
+            <label class="export-option">
+              <input id="exportEdits" type="checkbox" checked>
+              <span class="export-check"></span>
+              <span>Edit history</span>
+              <span class="info-tip" tabindex="0" data-tip="Include saved previous versions of edited messages. Edited rows and prior versions are styled yellow.">i</span>
+            </label>
+            <label class="export-option">
+              <input id="exportOmitEmpty" type="checkbox">
+              <span class="export-check"></span>
+              <span>Omit empty/unavailable messages</span>
+              <span class="info-tip" tabindex="0" data-tip="Completely remove messages that have no saved text, links, attachments, embeds, stickers, polls, reactions, threads, call data, or visible edit history. Link-only GIF/image messages are not considered empty.">i</span>
+            </label>
+            <label class="export-option">
+              <input id="exportImages" type="checkbox" checked>
+              <span class="export-check"></span>
+              <span>Embed images</span>
+              <span class="info-tip" tabindex="0" data-tip="Include cached image attachments inside the selected one-file export when Message Memory has the file saved.">i</span>
+            </label>
+            <label class="export-option">
+              <input id="exportMedia" type="checkbox" checked>
+              <span class="export-check"></span>
+              <span>Embed video & audio</span>
+              <span class="info-tip" tabindex="0" data-tip="Include cached videos, audio, and voice-message files inside the selected one-file export. Large media can make the export very large.">i</span>
+            </label>
+            <label class="export-option">
+              <input id="exportFiles" type="checkbox">
+              <span class="export-check"></span>
+              <span>Embed other files</span>
+              <span class="info-tip" tabindex="0" data-tip="Embed other cached attachment types inside the selected export instead of linking back to Discord's CDN.">i</span>
+            </label>
+            <label class="export-option advanced-option">
+              <input id="exportThreads" type="checkbox">
+              <span class="export-check"></span>
+              <span>Saved threads</span>
+              <span class="advanced-label">ADVANCED</span>
+              <span class="info-tip" tabindex="0" data-tip="Include saved child threads when Message Memory knows their parent channel. Interactive HTML uses the side drawer; MHTML uses script-free thread links.">i</span>
+            </label>
+          </div>
+        </div>
+      </details>
 
       <div id="exportProgress" class="export-progress" hidden>
         <div class="export-progress-row"><span id="exportProgressText">Preparing export…</span><span id="exportProgressPercent"></span></div>
