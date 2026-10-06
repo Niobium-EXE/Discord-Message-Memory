@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const HOOK_INSTANCE_VERSION = "1.3.15";
+  const HOOK_INSTANCE_VERSION = "1.3.19";
   if (window.__DMH_MAIN_HOOK_VERSION__ === HOOK_INSTANCE_VERSION) return;
   window.__DMH_MAIN_HOOK_VERSION__ = HOOK_INSTANCE_VERSION;
 
@@ -31,85 +31,8 @@
   let lastProgressStatusAt = 0;
   const recentEvents = new Map();
   let notificationSoundEnabled = false;
-  let notificationSoundConfigured = false;
-  const patchedSoundMethods = new WeakMap();
+  const notificationSoundPatchedObjects = new WeakSet();
   let notificationSoundPatchCount = 0;
-
-  function isMessageNotificationSound(args) {
-    const matches = value => {
-      value = String(value || "").toLowerCase();
-      return value === "message1" || /^message\d+$/.test(value) || value === "notification" || value === "notification1";
-    };
-    for (const arg of args || []) {
-      if (typeof arg === "string" && matches(arg)) return true;
-      if (arg && typeof arg === "object") {
-        for (const key of ["name", "sound", "soundName", "sound_name", "id"]) {
-          if (matches(safeGet(arg, key))) return true;
-        }
-      }
-    }
-    return false;
-  }
-
-  function requestReplacementNotificationSound() {
-    if (!notificationSoundEnabled || !notificationSoundConfigured) return false;
-    try {
-      post("PLAY_NOTIFICATION_SOUND", { requestedAt: Date.now() });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  function patchSoundMethod(target, method) {
-    if (!target || typeof safeGet(target, method) !== "function") return false;
-    let methods = patchedSoundMethods.get(target);
-    if (!methods) {
-      methods = new Set();
-      patchedSoundMethods.set(target, methods);
-    }
-    if (methods.has(method)) return false;
-    const original = target[method];
-    function dmhSoundWrapper(...args) {
-      if (notificationSoundEnabled && notificationSoundConfigured && isMessageNotificationSound(args)) {
-        if (requestReplacementNotificationSound()) return undefined;
-      }
-      return original.apply(this, args);
-    }
-    try {
-      Object.defineProperty(dmhSoundWrapper, "__dmhOriginal", { value: original });
-      target[method] = dmhSoundWrapper;
-      methods.add(method);
-      notificationSoundPatchCount += 1;
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  function installNotificationSoundPatches() {
-    captureWebpackRequire();
-    if (!webpackRequire?.c) return notificationSoundPatchCount;
-    const directMethods = ["playSound", "playNotificationSound", "playAudio"];
-    try {
-      for (const mod of Object.values(webpackRequire.c)) {
-        const exportsObject = safeGet(mod, "exports");
-        for (const candidate of candidatesFromExports(exportsObject)) {
-          if (!candidate || (typeof candidate !== "object" && typeof candidate !== "function")) continue;
-          for (const method of directMethods) patchSoundMethod(candidate, method);
-          const looksLikeSoundPlayer = typeof safeGet(candidate, "play") === "function" && (
-            typeof safeGet(candidate, "stop") === "function" ||
-            typeof safeGet(candidate, "stopAll") === "function" ||
-            typeof safeGet(candidate, "isPlaying") === "function" ||
-            typeof safeGet(candidate, "pause") === "function"
-          );
-          if (looksLikeSoundPlayer) patchSoundMethod(candidate, "play");
-        }
-      }
-    } catch {}
-    return notificationSoundPatchCount;
-  }
-
 
   // DM-only secondary tap. Discord can expose more than one Flux-like dispatcher
   // at runtime, and the dispatcher hanging off MessageStore is not always the one
@@ -1238,9 +1161,65 @@
       lastHookEventAt,
       messageStoreFound: Boolean(messageStore),
       channelStoreFound: Boolean(channelStore),
-      privateDmTapDispatchers: privateTapDispatcherCount,
-      notificationSoundPatches: notificationSoundPatchCount
+      privateDmTapDispatchers: privateTapDispatcherCount
     });
+  }
+
+  function containsMessageNotificationSound(value, depth = 0, seen = new WeakSet()) {
+    if (value == null || depth > 2) return false;
+    if (typeof value === "string") {
+      const normalized = value.toLowerCase().replace(/\\/g, "/");
+      return normalized === "message1" || normalized.endsWith("/message1") || normalized.includes("message1.");
+    }
+    if (typeof value !== "object" || seen.has(value)) return false;
+    seen.add(value);
+    for (const key of ["name", "sound", "soundName", "soundKey", "id", "src", "url"]) {
+      try { if (containsMessageNotificationSound(value[key], depth + 1, seen)) return true; } catch {}
+    }
+    return false;
+  }
+
+  function patchNotificationSoundObject(target) {
+    if (!target || (typeof target !== "object" && typeof target !== "function") || notificationSoundPatchedObjects.has(target)) return false;
+    let patched = false;
+    for (const methodName of ["playSound", "playNotificationSound"]) {
+      const original = safeGet(target, methodName);
+      if (typeof original !== "function" || original.__dmhNotificationSoundWrapped) continue;
+      function wrappedSound(...args) {
+        if (notificationSoundEnabled && args.some(arg => containsMessageNotificationSound(arg))) {
+          post("CUSTOM_NOTIFICATION_SOUND", { soundKey: "message1", requestedAt: Date.now() });
+          return undefined;
+        }
+        return original.apply(this, args);
+      }
+      try { Object.defineProperty(wrappedSound, "__dmhNotificationSoundWrapped", { value: true }); } catch {}
+      try {
+        target[methodName] = wrappedSound;
+        if (target[methodName] === wrappedSound || target[methodName]?.__dmhNotificationSoundWrapped) patched = true;
+      } catch {
+        try {
+          Object.defineProperty(target, methodName, { configurable: true, writable: true, value: wrappedSound });
+          patched = true;
+        } catch {}
+      }
+    }
+    if (patched) {
+      notificationSoundPatchedObjects.add(target);
+      notificationSoundPatchCount += 1;
+    }
+    return patched;
+  }
+
+  function installNotificationSoundPatch() {
+    captureWebpackRequire();
+    if (!webpackRequire?.c) return notificationSoundPatchCount;
+    try {
+      for (const mod of Object.values(webpackRequire.c)) {
+        const exportsObject = safeGet(mod, "exports");
+        for (const candidate of candidatesFromExports(exportsObject)) patchNotificationSoundObject(candidate);
+      }
+    } catch {}
+    return notificationSoundPatchCount;
   }
 
   function bootstrap(refreshBindings = false) {
@@ -1254,7 +1233,7 @@
     // discoverStores(true) resets subscribed and attaches them to the new one.
     subscribe();
     installPrivateDmTaps(false);
-    installNotificationSoundPatches();
+    installNotificationSoundPatch();
     return hookIsConnected();
   }
 
@@ -1263,6 +1242,7 @@
     const wasPatchAlive = isDispatchPatchAlive();
     bootstrap(true);
     installPrivateDmTaps(true);
+    installNotificationSoundPatch();
     const repaired = oldDispatcher !== dispatcher || (!wasPatchAlive && isDispatchPatchAlive());
     if (forceStatus || repaired) postProgressStatus(true);
     return hookIsConnected();
@@ -1272,16 +1252,15 @@
     if (event.source !== window || event.data?.source !== IN_SOURCE) return;
     const data = event.data;
 
-    if (data.type === "SET_NOTIFICATION_SOUND") {
-      notificationSoundEnabled = Boolean(data.enabled);
-      notificationSoundConfigured = Boolean(data.hasSound || data.dataUrl);
-      installNotificationSoundPatches();
-      return;
-    }
-
     if (data.type === "SET_LIVE_RESTORE_ENABLED") {
       liveRestoreEnabled = Boolean(data.enabled);
       if (!liveRestoreEnabled) clearLiveDeleteAnchors();
+      return;
+    }
+
+    if (data.type === "SET_NOTIFICATION_SOUND_SETTINGS") {
+      notificationSoundEnabled = Boolean(data.enabled);
+      installNotificationSoundPatch();
       return;
     }
 
@@ -1336,6 +1315,7 @@
   installWebpackRuntimeSniffer();
   bootstrap();
   installPrivateDmTaps(true);
+  installNotificationSoundPatch();
 
   // Fast startup retry: only for initial discovery.
   const retryTimer = setInterval(() => {

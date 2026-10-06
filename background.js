@@ -12,20 +12,9 @@ const DEFAULT_SETTINGS = {
   quickCss: "",
   sidebarCollapsed: false,
   notificationSoundEnabled: false,
-  notificationSoundDataUrl: "",
-  notificationSoundName: "",
+  notificationSound: null,
   notificationSoundVolume: 1
 };
-
-let chatListCache = null;
-let chatListCacheAt = 0;
-let chatListBuildPromise = null;
-const CHAT_LIST_CACHE_MS = 15_000;
-
-function invalidateChatListCache() {
-  chatListCache = null;
-  chatListCacheAt = 0;
-}
 
 const ACTION_ICONS = {
   off: {
@@ -70,77 +59,6 @@ async function syncHookActionIcon() {
     const data = await chrome.storage.local.get({ hookStatus: null });
     await setHookActionIcon(data.hookStatus || null);
   } catch {}
-}
-
-let offscreenAudioCreatePromise = null;
-
-async function ensureOffscreenAudioDocument() {
-  if (!chrome.offscreen?.createDocument) return false;
-  if (offscreenAudioCreatePromise) return offscreenAudioCreatePromise;
-  offscreenAudioCreatePromise = (async () => {
-    try {
-      if (chrome.offscreen.hasDocument) {
-        try {
-          if (await chrome.offscreen.hasDocument()) return true;
-        } catch {}
-      }
-      await chrome.offscreen.createDocument({
-        url: "offscreen.html",
-        reasons: ["AUDIO_PLAYBACK"],
-        justification: "Play the user's custom Discord notification sound."
-      });
-      return true;
-    } catch (error) {
-      const message = String(error?.message || error || "");
-      if (/single offscreen|already exists|only one offscreen/i.test(message)) return true;
-      return false;
-    } finally {
-      offscreenAudioCreatePromise = null;
-    }
-  })();
-  return offscreenAudioCreatePromise;
-}
-
-async function playCustomNotificationSound() {
-  const data = await chrome.storage.local.get({
-    notificationSoundEnabled: false,
-    notificationSoundDataUrl: "",
-    notificationSoundVolume: 1
-  });
-  if (!data.notificationSoundEnabled || !data.notificationSoundDataUrl) {
-    return { ok: false, reason: "not-configured" };
-  }
-  const ready = await ensureOffscreenAudioDocument();
-  if (!ready) return { ok: false, reason: "offscreen-unavailable" };
-  try {
-    // Do not make the offscreen document read chrome.storage directly. Some
-    // Chromium/Opera builds expose runtime to offscreen documents while storage
-    // is missing there. The service worker owns settings/storage and hands the
-    // already-loaded audio payload to the player instead.
-    let response = null;
-    let lastError = null;
-    // createDocument() may resolve a moment before offscreen.js has registered
-    // its message listener. Retry briefly so the first Test/notification after
-    // creation does not get lost in that startup race.
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      try {
-        response = await chrome.runtime.sendMessage({
-          target: "dmh-offscreen-audio",
-          type: "PLAY_CUSTOM_NOTIFICATION",
-          dataUrl: data.notificationSoundDataUrl,
-          volume: Math.max(0, Math.min(1, Number(data.notificationSoundVolume ?? 1)))
-        });
-        if (response) break;
-      } catch (error) {
-        lastError = error;
-      }
-      await new Promise(resolve => setTimeout(resolve, 60 * (attempt + 1)));
-    }
-    if (!response && lastError) throw lastError;
-    return response?.ok ? response : { ok: false, reason: response?.reason || "playback-failed" };
-  } catch (error) {
-    return { ok: false, reason: String(error?.message || error) };
-  }
 }
 
 let dbPromise;
@@ -371,16 +289,15 @@ async function upsertChannelMeta(record) {
     isThread: meta.isThread ?? old?.isThread ?? false,
     scope: meta.scope || record.channelScope || old?.scope || (record.guildId ? "server" : "private"),
     lastSeenAt: Date.now(),
-    summaryMessageCount: old?.summaryMessageCount ?? null,
-    summaryDeletedCount: old?.summaryDeletedCount ?? null,
-    summaryEditedCount: old?.summaryEditedCount ?? null,
-    summaryMediaCount: old?.summaryMediaCount ?? null,
-    summaryMediaBytes: old?.summaryMediaBytes ?? null,
-    summaryUpdatedAt: old?.summaryUpdatedAt || null,
+    messageCount: old?.messageCount ?? null,
+    deletedCount: old?.deletedCount ?? null,
+    editedCount: old?.editedCount ?? null,
+    mediaCount: old?.mediaCount ?? null,
+    mediaBytes: old?.mediaBytes ?? null,
+    summaryUpdatedAt: old?.summaryUpdatedAt || 0,
     summaryDirty: true
   });
   await txDone(tx);
-  invalidateChatListCache();
 }
 
 async function getMessage(channelId, messageId) {
@@ -651,113 +568,63 @@ async function cacheAttachments(record) {
   const attachments = Array.isArray(record?.attachments) ? record.attachments : [];
   if (!attachments.length) return;
   await Promise.allSettled(attachments.map(attachment => cacheSingleAttachment(record, attachment)));
-  invalidateChatListCache();
 }
 
-async function listChannelsFast() {
-  const db = await openDb();
-  const tx = db.transaction("channels", "readonly");
-  const channels = await requestToPromise(tx.objectStore("channels").getAll());
-  return channels
-    .map(channel => ({
-      ...channel,
-      messageCount: Number(channel.summaryMessageCount || 0),
-      deletedCount: Number(channel.summaryDeletedCount || 0),
-      editedCount: Number(channel.summaryEditedCount || 0),
-      mediaCount: Number(channel.summaryMediaCount || 0),
-      mediaBytes: Number(channel.summaryMediaBytes || 0),
-      summaryPending: Boolean(channel.summaryDirty || !channel.summaryUpdatedAt)
-    }))
-    .sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
-}
-
-function cursorToPromise(request, onValue) {
+async function scanCursor(store, onValue) {
   return new Promise((resolve, reject) => {
-    request.onerror = () => reject(request.error);
+    const request = store.openCursor();
+    request.onerror = () => reject(request.error || new Error("IndexedDB cursor failed."));
     request.onsuccess = () => {
       const cursor = request.result;
-      if (!cursor) {
-        resolve();
-        return;
-      }
-      try {
-        onValue(cursor.value);
-      } catch (error) {
-        reject(error);
-        return;
-      }
+      if (!cursor) { resolve(); return; }
+      onValue(cursor.value);
       cursor.continue();
     };
   });
 }
 
-async function persistChatSummaries(channels, aggregates) {
-  const db = await openDb();
-  const tx = db.transaction("channels", "readwrite");
-  const store = tx.objectStore("channels");
-  const now = Date.now();
-  const allIds = new Set([...channels.keys(), ...aggregates.keys()]);
-  for (const channelId of allIds) {
-    const old = channels.get(channelId) || { channelId };
-    const agg = aggregates.get(channelId) || {
-      messageCount: 0,
-      deletedCount: 0,
-      editedCount: 0,
-      mediaCount: 0,
-      mediaBytes: 0,
-      lastSeenAt: Number(old.lastSeenAt || 0),
-      guildId: old.guildId || null,
-      scope: old.scope || (old.guildId ? "server" : "private"),
-      authorNames: [],
-      authorIds: []
-    };
-    store.put({
-      ...old,
-      channelId,
-      guildId: old.guildId || agg.guildId || null,
-      scope: old.scope || agg.scope || (agg.guildId ? "server" : "private"),
-      lastSeenAt: Math.max(Number(old.lastSeenAt || 0), Number(agg.lastSeenAt || 0)),
-      summaryMessageCount: Number(agg.messageCount || 0),
-      summaryDeletedCount: Number(agg.deletedCount || 0),
-      summaryEditedCount: Number(agg.editedCount || 0),
-      summaryMediaCount: Number(agg.mediaCount || 0),
-      summaryMediaBytes: Number(agg.mediaBytes || 0),
-      summaryUpdatedAt: now,
-      summaryDirty: false
-    });
-  }
-  await txDone(tx);
+function blankChatAggregate(channelId, seed = {}) {
+  return {
+    channelId: String(channelId),
+    guildId: seed.guildId || null,
+    scope: seed.scope || (seed.guildId ? "server" : "private"),
+    messageCount: 0,
+    deletedCount: 0,
+    editedCount: 0,
+    mediaCount: 0,
+    mediaBytes: 0,
+    lastSeenAt: Number(seed.lastSeenAt || 0),
+    authorNames: Array.isArray(seed.authorNames) ? [...seed.authorNames] : [],
+    authorIds: Array.isArray(seed.authorIds) ? [...seed.authorIds] : []
+  };
 }
 
-async function buildChatList() {
+async function listChatsFast() {
   const db = await openDb();
-  const channelTx = db.transaction("channels", "readonly");
-  const channelRows = await requestToPromise(channelTx.objectStore("channels").getAll());
-  const channelMeta = new Map(channelRows.map(item => [String(item.channelId), item]));
-  const aggregates = new Map();
+  const channels = await requestToPromise(db.transaction("channels", "readonly").objectStore("channels").getAll());
+  return channels.map(meta => ({
+    ...meta,
+    messageCount: Number.isFinite(Number(meta.messageCount)) ? Number(meta.messageCount) : 0,
+    deletedCount: Number.isFinite(Number(meta.deletedCount)) ? Number(meta.deletedCount) : 0,
+    editedCount: Number.isFinite(Number(meta.editedCount)) ? Number(meta.editedCount) : 0,
+    mediaCount: Number.isFinite(Number(meta.mediaCount)) ? Number(meta.mediaCount) : 0,
+    mediaBytes: Number.isFinite(Number(meta.mediaBytes)) ? Number(meta.mediaBytes) : 0,
+    summaryPending: !meta.summaryUpdatedAt || Boolean(meta.summaryDirty)
+  })).sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
+}
 
-  // Use cursors instead of getAll(). getAll() cloned every message and every
-  // cached Blob into one giant array before the settings page could render.
-  // A cursor keeps memory bounded and lets Chromium yield between records.
+async function listChats() {
+  const db = await openDb();
+  const channels = await requestToPromise(db.transaction("channels", "readonly").objectStore("channels").getAll());
+  const channelMeta = new Map(channels.map(item => [String(item.channelId), item]));
+  const aggregates = new Map(channels.map(item => [String(item.channelId), blankChatAggregate(item.channelId, item)]));
+
   const msgTx = db.transaction("messages", "readonly");
-  await cursorToPromise(msgTx.objectStore("messages").openCursor(), record => {
-    const channelId = String(record.channelId || "");
-    if (!channelId) return;
-    if (!aggregates.has(channelId)) {
-      aggregates.set(channelId, {
-        channelId,
-        guildId: record.guildId || null,
-        scope: record.channelScope || (record.guildId ? "server" : "private"),
-        messageCount: 0,
-        deletedCount: 0,
-        editedCount: 0,
-        mediaCount: 0,
-        mediaBytes: 0,
-        lastSeenAt: 0,
-        authorNames: [],
-        authorIds: []
-      });
-    }
+  const msgDone = txDone(msgTx);
+  await scanCursor(msgTx.objectStore("messages"), record => {
+    if (!record?.channelId) return;
+    const channelId = String(record.channelId);
+    if (!aggregates.has(channelId)) aggregates.set(channelId, blankChatAggregate(channelId, record));
     const agg = aggregates.get(channelId);
     agg.messageCount += 1;
     if (record.deleted) agg.deletedCount += 1;
@@ -769,37 +636,49 @@ async function buildChatList() {
     if (authorName && !agg.authorNames.includes(authorName)) agg.authorNames.push(authorName);
     if (authorId && !agg.authorIds.includes(authorId)) agg.authorIds.push(authorId);
   });
+  await msgDone;
 
   const mediaTx = db.transaction("media", "readonly");
-  await cursorToPromise(mediaTx.objectStore("media").openCursor(), item => {
-    const agg = aggregates.get(String(item.channelId || ""));
-    if (!agg || !item.blob) return;
+  const mediaDone = txDone(mediaTx);
+  await scanCursor(mediaTx.objectStore("media"), item => {
+    if (!item?.channelId || !item.blob) return;
+    const channelId = String(item.channelId);
+    if (!aggregates.has(channelId)) aggregates.set(channelId, blankChatAggregate(channelId, item));
+    const agg = aggregates.get(channelId);
     agg.mediaCount += 1;
-    // Every media row already stores size separately. Prefer that so we do not
-    // need to inspect/read the Blob payload merely to calculate list totals.
-    agg.mediaBytes += Number(item.size || item.blob?.size || 0);
+    agg.mediaBytes += Number(item.blob.size || item.size || 0);
   });
+  await mediaDone;
 
-  await persistChatSummaries(channelMeta, aggregates).catch(() => {});
+  const result = [...aggregates.values()].map(agg => ({ ...agg, ...(channelMeta.get(agg.channelId) || {}), ...agg, summaryPending: false }));
 
-  return [...aggregates.values()]
-    .map(agg => ({ ...agg, ...(channelMeta.get(agg.channelId) || {}), summaryPending: false }))
-    .sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
-}
-
-async function listChats() {
-  if (chatListCache && Date.now() - chatListCacheAt < CHAT_LIST_CACHE_MS) return chatListCache;
-  if (chatListBuildPromise) return chatListBuildPromise;
-  chatListBuildPromise = buildChatList()
-    .then(result => {
-      chatListCache = result;
-      chatListCacheAt = Date.now();
-      return result;
-    })
-    .finally(() => {
-      chatListBuildPromise = null;
+  // Cache the expensive counts on the tiny channel records. This makes the next
+  // settings-page opening immediate even with hundreds of thousands of messages.
+  const writeTx = db.transaction("channels", "readwrite");
+  const store = writeTx.objectStore("channels");
+  const now = Date.now();
+  for (const chat of result) {
+    const meta = channelMeta.get(chat.channelId) || { channelId: chat.channelId };
+    store.put({
+      ...meta,
+      channelId: chat.channelId,
+      guildId: chat.guildId || meta.guildId || null,
+      scope: chat.scope || meta.scope || (chat.guildId ? "server" : "private"),
+      lastSeenAt: Math.max(Number(meta.lastSeenAt || 0), Number(chat.lastSeenAt || 0)),
+      authorNames: chat.authorNames || [],
+      authorIds: chat.authorIds || [],
+      messageCount: chat.messageCount,
+      deletedCount: chat.deletedCount,
+      editedCount: chat.editedCount,
+      mediaCount: chat.mediaCount,
+      mediaBytes: chat.mediaBytes,
+      summaryUpdatedAt: now,
+      summaryDirty: false
     });
-  return chatListBuildPromise;
+  }
+  await txDone(writeTx);
+
+  return result.sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
 }
 
 async function deleteChat(channelId) {
@@ -820,7 +699,6 @@ async function deleteChat(channelId) {
   const channelTx = db.transaction("channels", "readwrite");
   channelTx.objectStore("channels").delete(channelId);
   await txDone(channelTx);
-  invalidateChatListCache();
 
   return { ok: true, messagesDeleted: msgKeys.length, mediaDeleted: mediaKeys.length };
 }
@@ -832,16 +710,15 @@ async function deleteAllData() {
   tx.objectStore("media").clear();
   tx.objectStore("channels").clear();
   await txDone(tx);
-  invalidateChatListCache();
   return { ok: true };
 }
 
 async function getStats() {
   const db = await openDb();
-  const [messageCount, mediaCount, chats] = await Promise.all([
+  const [messageCount, mediaCount, channels] = await Promise.all([
     requestToPromise(db.transaction("messages", "readonly").objectStore("messages").count()),
     requestToPromise(db.transaction("media", "readonly").objectStore("media").count()),
-    listChats()
+    requestToPromise(db.transaction("channels", "readonly").objectStore("channels").getAll())
   ]);
   let usage = null;
   let quota = null;
@@ -850,12 +727,12 @@ async function getStats() {
     usage = estimate.usage ?? null;
     quota = estimate.quota ?? null;
   } catch {}
-
   return {
     messageCount,
     mediaCount,
-    channelCount: chats.length,
-    mediaBytes: chats.reduce((sum, chat) => sum + (chat.mediaBytes || 0), 0),
+    channelCount: channels.length,
+    mediaBytes: channels.reduce((sum, chat) => sum + Number(chat.mediaBytes || 0), 0),
+    summariesPending: channels.some(chat => !chat.summaryUpdatedAt || chat.summaryDirty),
     usage,
     quota
   };
@@ -886,6 +763,64 @@ async function getStorageHealth() {
     await chrome.storage.local.set({ storageStatus: status }).catch(() => {});
     return status;
   }
+}
+
+
+let offscreenCreatePromise = null;
+
+async function hasOffscreenDocument() {
+  try {
+    if (chrome.runtime.getContexts) {
+      const contexts = await chrome.runtime.getContexts({
+        contextTypes: ["OFFSCREEN_DOCUMENT"],
+        documentUrls: [chrome.runtime.getURL("offscreen.html")]
+      });
+      return contexts.length > 0;
+    }
+  } catch {}
+  return false;
+}
+
+async function ensureOffscreenDocument() {
+  if (!chrome.offscreen?.createDocument) throw new Error("This browser does not support extension offscreen audio playback.");
+  if (await hasOffscreenDocument()) return;
+  if (!offscreenCreatePromise) {
+    offscreenCreatePromise = chrome.offscreen.createDocument({
+      url: "offscreen.html",
+      reasons: ["AUDIO_PLAYBACK"],
+      justification: "Play the user-selected replacement for Discord notification sounds."
+    }).catch(async error => {
+      // A second caller may have created it while the first request was in flight.
+      if (!(await hasOffscreenDocument())) throw error;
+    }).finally(() => { offscreenCreatePromise = null; });
+  }
+  await offscreenCreatePromise;
+}
+
+async function playCustomNotificationSound({ force = false } = {}) {
+  const data = await chrome.storage.local.get({
+    notificationSoundEnabled: false,
+    notificationSound: null,
+    notificationSoundVolume: 1
+  });
+  if (!force && !data.notificationSoundEnabled) return { ok: false, reason: "disabled" };
+  const sound = data.notificationSound;
+  const dataUrl = typeof sound === "string" ? sound : sound?.dataUrl;
+  if (!dataUrl) return { ok: false, reason: "no-sound", error: "Choose a custom sound first." };
+  const volume = Math.max(0, Math.min(1, Number(data.notificationSoundVolume ?? 1)));
+  await ensureOffscreenDocument();
+  // Give a freshly-created offscreen page one short turn to attach its listener.
+  let result;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      result = await chrome.runtime.sendMessage({ type: "DMH_OFFSCREEN_PLAY", dataUrl, volume });
+      if (result?.ok) return result;
+    } catch (error) {
+      result = { ok: false, error: String(error?.message || error) };
+    }
+    await new Promise(resolve => setTimeout(resolve, 120));
+  }
+  return result || { ok: false, error: "Could not play the custom notification sound." };
 }
 
 async function injectFreshContentBridge(tabId) {
@@ -951,7 +886,6 @@ syncHookActionIcon();
 setTimeout(() => reconnectOpenDiscordTabs(), 250);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.target === "dmh-offscreen-audio") return false;
   (async () => {
     switch (message?.type) {
       case "DMH_UPSERT_MESSAGE":
@@ -972,13 +906,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return getMessage(message.channelId, message.id);
       case "DMH_GET_CHANNEL_HISTORY":
         return getChannelHistory(message.channelId);
-      case "DMH_LIST_CHANNELS_FAST":
-        return listChannelsFast();
       case "DMH_LIST_CHATS":
         return listChats();
-      case "DMH_INVALIDATE_CHAT_CACHE":
-        invalidateChatListCache();
-        return { ok: true };
+      case "DMH_LIST_CHATS_FAST":
+        return listChatsFast();
       case "DMH_DELETE_CHAT":
         return deleteChat(message.channelId);
       case "DMH_DELETE_ALL":
@@ -987,8 +918,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return getStats();
       case "DMH_STORAGE_HEALTH":
         return getStorageHealth();
-      case "DMH_PLAY_NOTIFICATION_SOUND":
-        return playCustomNotificationSound();
+      case "DMH_PLAY_CUSTOM_SOUND":
+        return playCustomNotificationSound({ force: Boolean(message.force) });
       case "DMH_ENSURE_MAIN_HOOK": {
         const tabId = sender?.tab?.id;
         if (!tabId) return { ok: false, reason: "no-tab" };

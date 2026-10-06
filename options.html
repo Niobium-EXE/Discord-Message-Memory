@@ -19,8 +19,8 @@
       </div>
       <nav>
         <a href="#general">General</a>
-        <a href="#saved-data">Saved data</a>
         <a href="#notifications">Notifications</a>
+        <a href="#saved-data">Saved data</a>
         <a href="#import-data">Import</a>
         <a href="#quickcss">Live CSS</a>
       </nav>
@@ -65,6 +65,43 @@
         </div>
       </section>
 
+      <section id="notifications" class="section">
+        <div class="section-heading compact">
+          <div>
+            <span class="eyebrow">NOTIFICATIONS</span>
+            <h2>Discord notification sound</h2>
+            <p>Replace Discord's regular message ping with a sound stored locally by this extension.</p>
+          </div>
+        </div>
+        <div class="card notification-card">
+          <label class="toggle-row">
+            <div>
+              <strong>Replace Discord notification sound</strong>
+              <p>Suppress Discord's normal message ping and play the selected sound instead.</p>
+            </div>
+            <input id="notificationSoundEnabled" type="checkbox">
+            <span class="switch"></span>
+          </label>
+          <div class="notification-sound-controls">
+            <div class="notification-sound-copy">
+              <strong>Custom sound file</strong>
+              <p id="notificationSoundStatus">No custom sound selected.</p>
+            </div>
+            <div class="notification-sound-buttons">
+              <button id="chooseNotificationSound" class="secondary-button" type="button">Choose audio</button>
+              <button id="testNotificationSound" class="secondary-button" type="button">Test</button>
+              <button id="resetNotificationSound" class="secondary-button" type="button">Reset</button>
+              <input id="notificationSoundInput" type="file" accept="audio/*,.mp3,.wav,.ogg,.opus,.m4a,.aac,.flac" hidden>
+            </div>
+            <label class="notification-volume-row" for="notificationSoundVolume">
+              <span>Volume</span>
+              <input id="notificationSoundVolume" type="range" min="0" max="100" step="1" value="100">
+              <output id="notificationSoundVolumeValue" for="notificationSoundVolume">100%</output>
+            </label>
+          </div>
+        </div>
+      </section>
+
       <section id="saved-data" class="section">
         <div class="section-heading compact">
           <div>
@@ -86,47 +123,6 @@
         </div>
       </section>
 
-
-
-      <section id="notifications" class="section">
-        <div class="section-heading compact">
-          <div>
-            <span class="eyebrow">NOTIFICATIONS</span>
-            <h2>Custom Discord notification sound</h2>
-            <p>Replace Discord's normal browser message ping with an audio file stored locally in this extension.</p>
-          </div>
-        </div>
-
-        <div class="card settings-card">
-          <label class="toggle-row">
-            <div>
-              <strong>Replace Discord notification sound</strong>
-              <p>Uses the selected sound for Discord's normal message notification ping. Other Discord sounds are left alone.</p>
-            </div>
-            <input id="notificationSoundEnabled" type="checkbox">
-            <span class="switch"></span>
-          </label>
-          <div class="sound-row">
-            <div class="sound-copy">
-              <strong>Custom sound file</strong>
-              <p id="notificationSoundStatus">No custom sound selected.</p>
-            </div>
-            <div class="sound-actions">
-              <button id="chooseNotificationSound" class="secondary-button" type="button">Choose audio</button>
-              <button id="testNotificationSound" class="secondary-button" type="button">Test</button>
-              <button id="clearNotificationSound" class="secondary-button" type="button">Reset</button>
-            </div>
-            <input id="notificationSoundFile" type="file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac" hidden>
-          </div>
-          <div class="sound-volume-row">
-            <div class="sound-volume-heading">
-              <strong>Volume</strong>
-              <span id="notificationSoundVolumeValue">100%</span>
-            </div>
-            <input id="notificationSoundVolume" class="sound-volume-slider" type="range" min="0" max="100" step="1" value="100" aria-label="Custom notification sound volume">
-          </div>
-        </div>
-      </section>
 
       <section id="import-data" class="section">
         <div class="section-heading compact">
@@ -150,7 +146,7 @@
           <div class="card import-card">
             <div class="import-card-copy">
               <strong>Import from Message Memory</strong>
-              <p>Import one or more standalone <code>.mhtml</code>/<code>.mht</code> or legacy <code>.html</code> transcripts exported by this extension. Newer exports contain an internal metadata block for a more complete round trip.</p>
+              <p>Import one or more single-file <code>.mhtml</code>/<code>.mht</code> transcripts exported by this extension. Older <code>.html</code> exports are still supported.</p>
             </div>
             <button id="importMemoryButton" class="secondary-button" type="button">Choose Message Memory exports</button>
             <input id="importMemoryInput" type="file" accept=".mhtml,.mht,.html,multipart/related,text/html" multiple hidden>
@@ -192,7 +188,7 @@
         <div>
           <span class="eyebrow">EXPORT</span>
           <h3 id="exportTitle">Export saved chat</h3>
-          <p id="exportSubtitle">Create a single-file MHTML transcript from Message Memory's saved copy.</p>
+          <p id="exportSubtitle">Create a standalone MHTML transcript from Message Memory's saved copy.</p>
         </div>
         <button id="exportClose" class="icon-button" value="cancel" type="submit" aria-label="Close export settings">×</button>
       </div>
@@ -220,19 +216,19 @@
           <input id="exportImages" type="checkbox" checked>
           <span class="export-check"></span>
           <span>Embed images</span>
-          <span class="info-tip" tabindex="0" data-tip="Store cached image attachments as MIME parts inside the single MHTML file when Message Memory has the file saved.">i</span>
+          <span class="info-tip" tabindex="0" data-tip="Put cached image attachments inside the single MHTML file when Message Memory has the file saved.">i</span>
         </label>
         <label class="export-option">
           <input id="exportMedia" type="checkbox" checked>
           <span class="export-check"></span>
           <span>Embed video & audio</span>
-          <span class="info-tip" tabindex="0" data-tip="Store cached videos, audio, and voice-message files as MIME parts inside the single MHTML file. Large media can make the export very large.">i</span>
+          <span class="info-tip" tabindex="0" data-tip="Put cached videos, audio, and voice-message files inside the single MHTML file. Large media can make the export very large.">i</span>
         </label>
         <label class="export-option">
           <input id="exportFiles" type="checkbox">
           <span class="export-check"></span>
           <span>Embed other files</span>
-          <span class="info-tip" tabindex="0" data-tip="Embed other cached attachment types as downloadable data inside the HTML instead of linking back to Discord's CDN.">i</span>
+          <span class="info-tip" tabindex="0" data-tip="Embed other cached attachment types inside the MHTML archive instead of linking back to Discord's CDN.">i</span>
         </label>
         <label class="export-option advanced-option">
           <input id="exportThreads" type="checkbox">

@@ -6,8 +6,7 @@ const DEFAULTS = {
   storageStatus: null,
   sidebarCollapsed: false,
   notificationSoundEnabled: false,
-  notificationSoundDataUrl: "",
-  notificationSoundName: "",
+  notificationSound: null,
   notificationSoundVolume: 1
 };
 
@@ -27,11 +26,11 @@ const hookPill = document.getElementById("hookPill");
 const appShell = document.querySelector(".app-shell");
 const sidebarToggle = document.getElementById("sidebarToggle");
 const notificationSoundEnabled = document.getElementById("notificationSoundEnabled");
-const notificationSoundFile = document.getElementById("notificationSoundFile");
+const notificationSoundStatus = document.getElementById("notificationSoundStatus");
 const chooseNotificationSound = document.getElementById("chooseNotificationSound");
 const testNotificationSound = document.getElementById("testNotificationSound");
-const clearNotificationSound = document.getElementById("clearNotificationSound");
-const notificationSoundStatus = document.getElementById("notificationSoundStatus");
+const resetNotificationSound = document.getElementById("resetNotificationSound");
+const notificationSoundInput = document.getElementById("notificationSoundInput");
 const notificationSoundVolume = document.getElementById("notificationSoundVolume");
 const notificationSoundVolumeValue = document.getElementById("notificationSoundVolumeValue");
 
@@ -61,6 +60,7 @@ let currentExportChat = null;
 let exportRunning = false;
 let exportDbPromise = null;
 let importRunning = false;
+let chatSummaryRefreshPromise = null;
 
 async function sendBackground(message) {
   try {
@@ -119,33 +119,13 @@ async function loadSettings() {
   applySidebarState(Boolean(data.sidebarCollapsed));
   updateHookStatus(data.hookStatus);
   notificationSoundEnabled.checked = Boolean(data.notificationSoundEnabled);
-  setNotificationSoundVolumeUi(data.notificationSoundVolume);
-  updateNotificationSoundUi(data.notificationSoundName || "", data.notificationSoundDataUrl || "");
+  const sound = data.notificationSound;
+  notificationSoundStatus.textContent = sound?.name ? `${sound.name}${sound.size ? ` · ${formatBytes(sound.size)}` : ""}` : "No custom sound selected.";
+  const volume = Math.max(0, Math.min(1, Number(data.notificationSoundVolume ?? 1)));
+  notificationSoundVolume.value = String(Math.round(volume * 100));
+  notificationSoundVolumeValue.value = `${Math.round(volume * 100)}%`;
+  notificationSoundVolumeValue.textContent = `${Math.round(volume * 100)}%`;
 }
-
-function updateNotificationSoundUi(name, dataUrl) {
-  const hasSound = Boolean(dataUrl);
-  notificationSoundStatus.textContent = hasSound ? `${name || "Custom audio"} · stored locally` : "No custom sound selected.";
-  testNotificationSound.disabled = !hasSound;
-  clearNotificationSound.disabled = !hasSound;
-}
-
-function setNotificationSoundVolumeUi(value) {
-  const normalized = Math.max(0, Math.min(1, Number(value ?? 1)));
-  const percent = Math.round(normalized * 100);
-  notificationSoundVolume.value = String(percent);
-  notificationSoundVolumeValue.textContent = `${percent}%`;
-}
-
-function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(reader.error || new Error("Could not read audio file."));
-    reader.readAsDataURL(file);
-  });
-}
-
 
 async function loadStats() {
   const ids = ["messageCount", "channelCount", "mediaCount", "mediaBytes"];
@@ -250,8 +230,7 @@ function renderChats() {
 
     const meta = document.createElement("div");
     meta.className = "chat-meta";
-    const summaryText = `${formatNumber(chat.messageCount)} messages · ${formatNumber(chat.deletedCount)} deleted · ${formatNumber(chat.editedCount)} edited · ${formatBytes(chat.mediaBytes)} files`;
-    meta.textContent = chat.summaryPending ? `${summaryText} · updating…` : summaryText;
+    meta.textContent = `${formatNumber(chat.messageCount)} messages · ${formatNumber(chat.deletedCount)} deleted · ${formatNumber(chat.editedCount)} edited · ${formatBytes(chat.mediaBytes)} files${chat.summaryPending ? " · updating…" : ""}`;
     info.appendChild(meta);
 
     const id = document.createElement("div");
@@ -292,28 +271,26 @@ function renderChats() {
   }
 }
 
-async function loadChats() {
-  chatList.innerHTML = '<div class="empty-state">Loading saved chats…</div>';
+async function loadChats({ exact = false, refreshExact = true } = {}) {
+  if (!exact) chatList.innerHTML = '<div class="empty-state">Loading saved chats…</div>';
   try {
-    // First paint uses only the tiny channels store. This makes hundreds of
-    // thousands of saved messages irrelevant to how quickly the chat list
-    // itself appears.
-    const quick = await sendBackground({ type: "DMH_LIST_CHANNELS_FAST" });
-    if (Array.isArray(quick) && quick.length) {
-      chats = quick;
-      renderChats();
-    }
-
-    // Exact message/deleted/edit/media counts are filled in by one shared
-    // background scan. DMH_GET_STATS reuses the same scan instead of starting
-    // another full pass over IndexedDB.
-    const result = await sendBackground({ type: "DMH_LIST_CHATS" });
+    const result = await sendBackground({ type: exact ? "DMH_LIST_CHATS" : "DMH_LIST_CHATS_FAST" });
     chats = Array.isArray(result) ? result : [];
     renderChats();
+
+    if (!exact && refreshExact && !chatSummaryRefreshPromise) {
+      chatSummaryRefreshPromise = (async () => {
+        try {
+          const exactResult = await sendBackground({ type: "DMH_LIST_CHATS" });
+          chats = Array.isArray(exactResult) ? exactResult : chats;
+          renderChats();
+          await loadStats().catch(() => {});
+        } finally {
+          chatSummaryRefreshPromise = null;
+        }
+      })();
+    }
   } catch (error) {
-    // Keep the lightweight list visible if only the detailed statistics pass
-    // failed. It is still useful for opening exports/deleting chats.
-    if (chats.length) return;
     chats = [];
     chatList.innerHTML = "";
     const item = document.createElement("div");
@@ -596,57 +573,38 @@ async function repairLegacyLocalImportEdits() {
   try { db = await openExportDb(); } catch { return { repaired: 0 }; }
   const tx = db.transaction("messages", "readwrite");
   const store = tx.objectStore("messages");
+  const records = await idbRequest(store.getAll());
   let repaired = 0;
-
-  // Cursor instead of getAll(): legacy repair can touch a very large history,
-  // but it no longer needs to allocate the whole message database at once.
-  await new Promise((resolve, reject) => {
-    const request = store.openCursor();
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (!cursor) { resolve(); return; }
-      const record = cursor.value;
-      if (record?.importSource === "local-discord-exporter" && Array.isArray(record.editHistory) && record.editHistory.length) {
-        const original = record.editHistory;
-        const currentSemantic = normalizeImportedSemanticText(record.content || "");
-        const byKey = new Map();
-        for (const item of original) {
-          if (!item) continue;
-          const text = normalizeImportText(item.content || "");
-          const semantic = normalizeImportedSemanticText(text);
-          if (isImportPlaceholderText(text)) continue;
-          if (currentSemantic && semantic === currentSemantic) continue;
-          const time = importTimestamp(item.editedAt);
-          const key = time ? `t:${time}` : `s:${semantic}\n${importAttachmentSignature(item.attachments || [])}`;
-          if (!byKey.has(key)) byKey.set(key, item);
-        }
-        let cleaned = [...byKey.values()];
-        if (record.importExplicitEdit === false) cleaned = [];
-        if (cleaned.length !== original.length || cleaned.some((item, i) => item !== original[i])) {
-          cursor.update({ ...record, editHistory: cleaned });
-          repaired += 1;
-        }
-      }
-      cursor.continue();
-    };
-  });
+  for (const record of records) {
+    if (record?.importSource !== "local-discord-exporter" || !Array.isArray(record.editHistory) || !record.editHistory.length) continue;
+    const original = record.editHistory;
+    const currentSemantic = normalizeImportedSemanticText(record.content || "");
+    const byKey = new Map();
+    for (const item of original) {
+      if (!item) continue;
+      const text = normalizeImportText(item.content || "");
+      const semantic = normalizeImportedSemanticText(text);
+      if (isImportPlaceholderText(text)) continue;
+      // Presentation-only differences: same words with/without inline emoji,
+      // or same message body with a different attachment/preview state.
+      if (currentSemantic && semantic === currentSemantic) continue;
+      const time = importTimestamp(item.editedAt);
+      const key = time ? `t:${time}` : `s:${semantic}\n${importAttachmentSignature(item.attachments || [])}`;
+      if (!byKey.has(key)) byKey.set(key, item);
+    }
+    let cleaned = [...byKey.values()];
+    if (record.importExplicitEdit === false) cleaned = [];
+    if (cleaned.length !== original.length || cleaned.some((item, i) => item !== original[i])) {
+      store.put({ ...record, editHistory: cleaned });
+      repaired += 1;
+    }
+  }
   await idbTxDone(tx);
   return { repaired };
 }
 
-async function runLegacyImportRepairOnce() {
-  const key = "legacyImportRepairVersion";
-  try {
-    const state = await chrome.storage.local.get({ [key]: 0 });
-    if (Number(state[key] || 0) >= 1318) return;
-    await repairLegacyLocalImportEdits();
-    await chrome.storage.local.set({ [key]: 1318 });
-  } catch {}
-}
-
 function mergeImportedChannel(existing, incoming) {
-  if (!existing) return { ...incoming, channelId: String(incoming.channelId), lastSeenAt: Number(incoming.lastSeenAt || 0) || Date.now(), summaryDirty: true };
+  if (!existing) return { ...incoming, channelId: String(incoming.channelId), lastSeenAt: Number(incoming.lastSeenAt || 0) || Date.now() };
   const union = (a, b) => uniqueNames([...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])]);
   return {
     ...incoming,
@@ -664,8 +622,7 @@ function mergeImportedChannel(existing, incoming) {
     isThread: Boolean(existing.isThread || incoming.isThread),
     scope: existing.scope || incoming.scope || (existing.guildId || incoming.guildId ? "server" : "private"),
     lastSeenAt: Math.max(Number(existing.lastSeenAt || 0), Number(incoming.lastSeenAt || 0), Date.now()),
-    importSource: existing.importSource || incoming.importSource || null,
-    summaryDirty: true
+    importSource: existing.importSource || incoming.importSource || null
   };
 }
 
@@ -791,7 +748,6 @@ async function runImportFiles(files, kind) {
     }
 
     await repairLegacyLocalImportEdits().catch(() => {});
-    await sendBackground({ type: "DMH_INVALIDATE_CHAT_CACHE" }).catch(() => {});
     await Promise.allSettled([loadChats(), loadStats()]);
     const successfulFiles = list.length - failures.length;
     const summary = [
@@ -1274,6 +1230,66 @@ function exportMessageHasMeaningfulContent(record, options, preservedLinks = nul
   return false;
 }
 
+function isImageLikeExportUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return false;
+  try {
+    const url = new URL(raw);
+    const path = url.pathname.toLowerCase();
+    const host = url.hostname.toLowerCase();
+    if (/\.(?:png|jpe?g|gif|webp|avif|bmp|svg)(?:$|[?#])/i.test(`${path}${url.search}${url.hash}`)) return true;
+    // Discord often stores GIF-provider pages as plain links when embeds/previews
+    // are disabled, so those still belong under the Images filter.
+    if (/\/(?:gif|gifs)(?:\/|$)/i.test(path)) return true;
+    if (/(?:^|\.)(?:tenor\.com|giphy\.com|klipy\.com)$/i.test(host)) return true;
+  } catch {}
+  return false;
+}
+
+function recordHasExportImage(record) {
+  const attachments = Array.isArray(record?.attachments) ? record.attachments : [];
+  if (attachments.some(attachment =>
+    attachmentKind(attachment) === "image" ||
+    isImageLikeExportUrl(attachment?.url) ||
+    isImageLikeExportUrl(attachment?.proxyUrl || attachment?.proxy_url)
+  )) return true;
+
+  const embeds = Array.isArray(record?.embeds) ? record.embeds : [];
+  if (embeds.some(embed =>
+    embed?.image?.url || embed?.thumbnail?.url ||
+    isImageLikeExportUrl(embed?.url) || isImageLikeExportUrl(embed?.video?.url)
+  )) return true;
+
+  const directCandidates = [
+    ...(Array.isArray(record?.links) ? record.links : []),
+    ...(Array.isArray(record?.linkUrls) ? record.linkUrls : [])
+  ];
+  if (directCandidates.some(item => isImageLikeExportUrl(typeof item === "string" ? item : item?.url))) return true;
+
+  const contentUrls = String(record?.content || "").match(/https?:\/\/[^\s<>]+/gi) || [];
+  return contentUrls.some(isImageLikeExportUrl);
+}
+
+function exportMessageSearchText(record, options) {
+  const parts = [];
+  const add = value => { const text = String(value ?? "").trim(); if (text) parts.push(text); };
+  add(record?.content);
+  add(exportAuthorName(record));
+  for (const link of messageLinks(record)) { add(link?.text); add(link?.url); }
+  for (const attachment of Array.isArray(record?.attachments) ? record.attachments : []) add(attachment?.filename);
+  for (const embed of Array.isArray(record?.embeds) ? record.embeds : []) {
+    add(embed?.title); add(embed?.description); add(embed?.url);
+    for (const field of Array.isArray(embed?.fields) ? embed.fields : []) { add(field?.name); add(field?.value); }
+  }
+  for (const sticker of Array.isArray(record?.stickers) ? record.stickers : []) add(sticker?.name);
+  if (record?.poll) {
+    add(record.poll?.question?.text || record.poll?.question);
+    for (const answer of Array.isArray(record.poll?.answers) ? record.poll.answers : []) add(answer?.poll_media?.text || answer?.pollMedia?.text || answer?.text);
+  }
+  if (options?.edits) for (const edit of visibleExportEditHistory(record, options)) add(edit?.content);
+  return parts.join("\n").toLowerCase();
+}
+
 function renderMessage(record, options, mediaMap, threadMap = new Map(), avatarMap = new Map()) {
   if (record.deleted && !options.deleted) return "";
   const visibleHistory = visibleExportEditHistory(record, options);
@@ -1300,7 +1316,9 @@ function renderMessage(record, options, mediaMap, threadMap = new Map(), avatarM
   const embeds = Array.isArray(record.embeds) ? record.embeds.map(renderEmbed).join("") : "";
   const stickers = Array.isArray(record.stickers) && record.stickers.length ? `<div class="stickers">${record.stickers.map(sticker => `<span>Sticker: ${escapeHtml(sticker?.name || sticker?.id || "sticker")}</span>`).join("")}</div>` : "";
   const timestampIso = exportIsoTime(record.timestamp, record.id);
-  return `<article class="${classes}" id="message-${escapeHtml(record.id)}" data-message-id="${escapeHtml(record.id)}" data-channel-id="${escapeHtml(record.channelId)}" data-deleted="${record.deleted ? "true" : "false"}">
+  const searchText = exportMessageSearchText(record, options);
+  const hasImage = recordHasExportImage(record);
+  return `<article class="${classes}" id="message-${escapeHtml(record.id)}" data-message-id="${escapeHtml(record.id)}" data-channel-id="${escapeHtml(record.channelId)}" data-deleted="${record.deleted ? "true" : "false"}" data-edited="${editedVisible ? "true" : "false"}" data-has-image="${hasImage ? "true" : "false"}" data-search="${escapeHtml(searchText)}">
     ${avatarHtml}
     <div class="message-main">
       <div class="message-header"><strong>${escapeHtml(author)}</strong><time${timestampIso ? ` datetime="${escapeHtml(timestampIso)}"` : ""}>${escapeHtml(formatExportTime(record.timestamp, record.id))}</time><div class="statuses">${status}</div></div>
@@ -1331,7 +1349,7 @@ function renderThreadPanels(threads, options, mediaMap, avatarMap) {
 
 function exportDocumentCss() {
   return `
-:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0b0d10;color:#dbdee1}*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:#0b0d10;color:#dbdee1}body{overflow-x:hidden}a{color:#00a8fc;text-decoration:none}a:hover{text-decoration:underline}.topbar{position:sticky;top:0;z-index:20;display:flex;justify-content:space-between;gap:24px;align-items:center;padding:18px 24px;border-bottom:1px solid #23262d;background:rgba(11,13,16,.94);backdrop-filter:blur(16px)}.topbar h1{margin:0;color:#f2f3f5;font-size:18px}.topbar p{margin:4px 0 0;color:#8a919b;font-size:11px}.export-meta{color:#7e8590;font-size:10px;text-align:right}.layout{max-width:1050px;margin:0 auto;padding:18px 20px 70px}.thread-index{display:flex;flex-wrap:wrap;gap:7px;margin:0 0 14px;padding:12px;border:1px solid #262a31;border-radius:9px;background:#111318}.thread-index button,.thread-button{border:1px solid #343943;border-radius:7px;background:#1a1d23;color:#d8dbe0;cursor:pointer}.thread-index button{padding:7px 9px;font-size:10px}.message{position:relative;display:grid;grid-template-columns:42px minmax(0,1fr);gap:10px;margin:2px 0;padding:8px 12px;border:1px solid transparent;border-radius:8px}.message:hover{background:#111318}.message.deleted{border-color:rgba(242,63,67,.72);background:linear-gradient(90deg,rgba(242,63,67,.08),rgba(242,63,67,.025))}.message.edited:not(.deleted){border-color:rgba(240,178,50,.7);background:linear-gradient(90deg,rgba(240,178,50,.075),rgba(240,178,50,.02))}.message.call-event:not(.deleted){border-color:rgba(88,101,242,.78);background:linear-gradient(90deg,rgba(88,101,242,.14),rgba(88,101,242,.035) 72%,transparent)}.message.call-event:hover{background:linear-gradient(90deg,rgba(88,101,242,.19),rgba(88,101,242,.055) 72%,transparent)}.call-event-content{display:flex;align-items:center;gap:8px;min-height:26px;padding:4px 8px;border-left:3px solid #5865f2;border-radius:5px;background:rgba(88,101,242,.08);color:#aeb8ff;font-size:13px;line-height:1.4}.call-event-content strong{color:#d6dbff}.call-event-icon{display:inline-grid;place-items:center;flex:0 0 auto;width:20px;height:20px;color:#7289ff}.call-event-icon svg{display:block;width:18px;height:18px}.avatar{position:relative;width:40px;height:40px;display:grid;place-items:center;overflow:hidden;border-radius:50%;background:#262b33;color:#f2f3f5;font-size:12px;font-weight:800}.avatar span{position:relative;z-index:0}.avatar img{position:absolute;z-index:1;inset:0;width:100%;height:100%;object-fit:cover;border-radius:inherit}.message-main{min-width:0}.message-header{display:flex;align-items:baseline;gap:8px;min-height:20px}.message-header strong{color:#f2f3f5;font-size:14px}.message-header time{color:#777e88;font-size:10px}.statuses{display:flex;gap:4px;margin-left:auto}.status{display:inline-flex;padding:1px 5px;border:1px solid;border-radius:999px;font-size:8px;font-weight:800;letter-spacing:.05em}.deleted-status{border-color:rgba(242,63,67,.7);color:#ff6b70;background:rgba(242,63,67,.1)}.edited-status{border-color:rgba(240,178,50,.75);color:#f0b232;background:rgba(240,178,50,.09)}.message-content{font-size:14px;line-height:1.4;overflow-wrap:anywhere}.message-links{display:grid;gap:3px;margin-top:3px;font-size:13px;line-height:1.35;overflow-wrap:anywhere}.message-links a{width:fit-content;max-width:100%;word-break:break-all}.empty-message{color:#6f7680;font-style:italic}.reply{margin:0 0 4px;padding-left:9px;border-left:2px solid #4e545e;color:#8c939d;font-size:11px}.reply span{margin-right:6px;color:#b5bac1;font-weight:700}.edit-history{display:grid;gap:5px;margin:4px 0 6px}.edit-version{width:fit-content;max-width:100%;min-width:180px;padding:5px 9px;border:1px solid rgba(240,178,50,.28);border-left-width:2px;border-radius:6px;background:rgba(240,178,50,.035)}.edit-version-content{font-size:13px;line-height:1.35}.edit-version-time{margin-top:2px;color:#8d8b78;font-size:9px}.attachments{display:grid;gap:7px;margin-top:7px}.attachment{max-width:min(640px,100%)}.image-attachment{margin:0}.image-attachment img{display:block;max-width:100%;max-height:520px;border-radius:8px;border:1px solid #282c33;background:#08090b}.image-attachment figcaption,.media-attachment>div{margin-top:4px;color:#8c939d;font-size:10px}.media-attachment video{display:block;max-width:100%;max-height:520px;border-radius:8px;background:#050607}.audio-attachment{padding:8px 10px;border:1px solid #2d323a;border-radius:8px;background:#15181d}.audio-attachment audio{display:block;width:min(480px,100%);margin-top:6px}.audio-download{display:inline-block;margin-top:5px;font-size:10px;font-weight:650}.audio-download[hidden]{display:none!important}.file-attachment{display:flex;align-items:center;gap:10px;width:fit-content;min-width:260px;padding:9px 10px;border:1px solid #30353e;border-radius:8px;background:#171a20}.file-attachment:hover{text-decoration:none;background:#1c2027}.file-icon{display:grid;place-items:center;width:34px;height:38px;border-radius:5px;background:#5865f2;color:#fff;font-size:8px;font-weight:900}.file-attachment strong{display:block;color:#00a8fc;font-size:11px}.file-attachment small{display:block;margin-top:2px;color:#858c96;font-size:9px}.attachment-source{display:inline-block;margin-left:6px;color:#68707b;font-size:8px}.unavailable{opacity:.62}.embed{max-width:540px;margin-top:7px;padding:9px 11px;border-left:4px solid #4f545c;border-radius:4px;background:#17191e}.embed-title{font-size:13px;font-weight:700}.embed-description{margin-top:4px;font-size:12px;line-height:1.45}.embed-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:7px}.embed-field{font-size:10px}.embed-field strong{display:block;margin-bottom:2px}.embed-image{display:block;max-width:100%;max-height:360px;margin-top:8px;border-radius:5px}.poll{width:fit-content;max-width:500px;margin-top:7px;padding:9px 11px;border:1px solid #30353e;border-radius:8px;background:#15181d;font-size:11px}.poll ul{margin:5px 0 0;padding-left:18px}.reactions{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}.reaction{padding:2px 7px;border:1px solid #30353e;border-radius:999px;background:#191c21;font-size:10px}.stickers{margin-top:6px;color:#a8adb5;font-size:10px}.thread-button{display:flex;align-items:center;gap:7px;width:fit-content;margin-top:7px;padding:6px 8px;font-size:10px}.thread-button span{color:#858c96;font-size:8px;font-weight:800}.thread-button b{margin-left:4px;color:#848b95}.thread-drawer{position:fixed;z-index:50;top:0;right:0;width:min(620px,92vw);height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr);border-left:1px solid #343840;background:#0e1014;box-shadow:-24px 0 70px rgba(0,0,0,.45);transform:translateX(105%);transition:transform 160ms ease}.thread-drawer.open{transform:translateX(0)}.thread-drawer-header{display:flex;justify-content:space-between;align-items:center;padding:13px 15px;border-bottom:1px solid #262a31;background:#13161b}.thread-drawer-header strong{font-size:12px}.thread-close{width:30px;height:30px;border:1px solid #353a43;border-radius:7px;background:#1b1e24;color:#c9cdd3;cursor:pointer}.thread-drawer-body{overflow:auto;padding:10px}.thread-panel-title{padding:8px 10px 12px;border-bottom:1px solid #252930}.thread-panel-title span{display:block;color:#7d86ff;font-size:8px;font-weight:900;letter-spacing:.1em}.thread-panel-title strong{display:block;margin-top:3px;font-size:15px}.thread-panel-title small{display:block;margin-top:3px;color:#7c838d;font-size:9px}.thread-empty{padding:30px;text-align:center;color:#777e88}.thread-backdrop{position:fixed;z-index:49;inset:0;background:rgba(0,0,0,.45);opacity:0;visibility:hidden;transition:120ms ease}.thread-backdrop.open{opacity:1;visibility:visible}@media(max-width:700px){.topbar{align-items:flex-start;padding:14px 15px}.export-meta{display:none}.layout{padding:12px 8px 50px}.message{grid-template-columns:34px minmax(0,1fr);padding:8px}.avatar{width:32px;height:32px}.embed-fields{grid-template-columns:1fr}.statuses{position:absolute;right:8px;top:7px}.message-header{padding-right:60px}}
+:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0b0d10;color:#dbdee1}*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:#0b0d10;color:#dbdee1}body{overflow-x:hidden}a{color:#00a8fc;text-decoration:none}a:hover{text-decoration:underline}.topbar{position:sticky;top:0;z-index:20;display:flex;justify-content:space-between;gap:24px;align-items:center;padding:18px 24px;border-bottom:1px solid #23262d;background:rgba(11,13,16,.94);backdrop-filter:blur(16px)}.topbar h1{margin:0;color:#f2f3f5;font-size:18px}.topbar p{margin:4px 0 0;color:#8a919b;font-size:11px}.export-meta{color:#7e8590;font-size:10px;text-align:right}.layout{max-width:1050px;margin:0 auto;padding:18px 20px 70px}.thread-index{display:flex;flex-wrap:wrap;gap:7px;margin:0 0 14px;padding:12px;border:1px solid #262a31;border-radius:9px;background:#111318}.thread-index button,.thread-button{border:1px solid #343943;border-radius:7px;background:#1a1d23;color:#d8dbe0;cursor:pointer}.thread-index button{padding:7px 9px;font-size:10px}.message{position:relative;display:grid;grid-template-columns:42px minmax(0,1fr);gap:10px;margin:2px 0;padding:8px 12px;border:1px solid transparent;border-radius:8px}.message:hover{background:#111318}.message.deleted{border-color:rgba(242,63,67,.72);background:linear-gradient(90deg,rgba(242,63,67,.08),rgba(242,63,67,.025))}.message.edited:not(.deleted){border-color:rgba(240,178,50,.7);background:linear-gradient(90deg,rgba(240,178,50,.075),rgba(240,178,50,.02))}.message.call-event:not(.deleted){border-color:rgba(88,101,242,.78);background:linear-gradient(90deg,rgba(88,101,242,.14),rgba(88,101,242,.035) 72%,transparent)}.message.call-event:hover{background:linear-gradient(90deg,rgba(88,101,242,.19),rgba(88,101,242,.055) 72%,transparent)}.call-event-content{display:flex;align-items:center;gap:8px;min-height:26px;padding:4px 8px;border-left:3px solid #5865f2;border-radius:5px;background:rgba(88,101,242,.08);color:#aeb8ff;font-size:13px;line-height:1.4}.call-event-content strong{color:#d6dbff}.call-event-icon{display:inline-grid;place-items:center;flex:0 0 auto;width:20px;height:20px;color:#7289ff}.call-event-icon svg{display:block;width:18px;height:18px}.avatar{position:relative;width:40px;height:40px;display:grid;place-items:center;overflow:hidden;border-radius:50%;background:#262b33;color:#f2f3f5;font-size:12px;font-weight:800}.avatar span{position:relative;z-index:0}.avatar img{position:absolute;z-index:1;inset:0;width:100%;height:100%;object-fit:cover;border-radius:inherit}.message-main{min-width:0}.message-header{display:flex;align-items:baseline;gap:8px;min-height:20px}.message-header strong{color:#f2f3f5;font-size:14px}.message-header time{color:#777e88;font-size:10px}.statuses{display:flex;gap:4px;margin-left:auto}.status{display:inline-flex;padding:1px 5px;border:1px solid;border-radius:999px;font-size:8px;font-weight:800;letter-spacing:.05em}.deleted-status{border-color:rgba(242,63,67,.7);color:#ff6b70;background:rgba(242,63,67,.1)}.edited-status{border-color:rgba(240,178,50,.75);color:#f0b232;background:rgba(240,178,50,.09)}.message-content{font-size:14px;line-height:1.4;overflow-wrap:anywhere}.message-links{display:grid;gap:3px;margin-top:3px;font-size:13px;line-height:1.35;overflow-wrap:anywhere}.message-links a{width:fit-content;max-width:100%;word-break:break-all}.empty-message{color:#6f7680;font-style:italic}.reply{margin:0 0 4px;padding-left:9px;border-left:2px solid #4e545e;color:#8c939d;font-size:11px}.reply span{margin-right:6px;color:#b5bac1;font-weight:700}.edit-history{display:grid;gap:5px;margin:4px 0 6px}.edit-version{width:fit-content;max-width:100%;min-width:180px;padding:5px 9px;border:1px solid rgba(240,178,50,.28);border-left-width:2px;border-radius:6px;background:rgba(240,178,50,.035)}.edit-version-content{font-size:13px;line-height:1.35}.edit-version-time{margin-top:2px;color:#8d8b78;font-size:9px}.attachments{display:grid;gap:7px;margin-top:7px}.attachment{max-width:min(640px,100%)}.image-attachment{margin:0}.image-attachment img{display:block;max-width:100%;max-height:520px;border-radius:8px;border:1px solid #282c33;background:#08090b}.image-attachment figcaption,.media-attachment>div{margin-top:4px;color:#8c939d;font-size:10px}.media-attachment video{display:block;max-width:100%;max-height:520px;border-radius:8px;background:#050607}.audio-attachment{padding:8px 10px;border:1px solid #2d323a;border-radius:8px;background:#15181d}.audio-attachment audio{display:block;width:min(480px,100%);margin-top:6px}.audio-download{display:inline-block;margin-top:5px;font-size:10px;font-weight:650}.audio-download[hidden]{display:none!important}.file-attachment{display:flex;align-items:center;gap:10px;width:fit-content;min-width:260px;padding:9px 10px;border:1px solid #30353e;border-radius:8px;background:#171a20}.file-attachment:hover{text-decoration:none;background:#1c2027}.file-icon{display:grid;place-items:center;width:34px;height:38px;border-radius:5px;background:#5865f2;color:#fff;font-size:8px;font-weight:900}.file-attachment strong{display:block;color:#00a8fc;font-size:11px}.file-attachment small{display:block;margin-top:2px;color:#858c96;font-size:9px}.attachment-source{display:inline-block;margin-left:6px;color:#68707b;font-size:8px}.unavailable{opacity:.62}.embed{max-width:540px;margin-top:7px;padding:9px 11px;border-left:4px solid #4f545c;border-radius:4px;background:#17191e}.embed-title{font-size:13px;font-weight:700}.embed-description{margin-top:4px;font-size:12px;line-height:1.45}.embed-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:7px}.embed-field{font-size:10px}.embed-field strong{display:block;margin-bottom:2px}.embed-image{display:block;max-width:100%;max-height:360px;margin-top:8px;border-radius:5px}.poll{width:fit-content;max-width:500px;margin-top:7px;padding:9px 11px;border:1px solid #30353e;border-radius:8px;background:#15181d;font-size:11px}.poll ul{margin:5px 0 0;padding-left:18px}.reactions{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}.reaction{padding:2px 7px;border:1px solid #30353e;border-radius:999px;background:#191c21;font-size:10px}.stickers{margin-top:6px;color:#a8adb5;font-size:10px}.thread-button{display:flex;align-items:center;gap:7px;width:fit-content;margin-top:7px;padding:6px 8px;font-size:10px}.thread-button span{color:#858c96;font-size:8px;font-weight:800}.thread-button b{margin-left:4px;color:#848b95}.thread-drawer{position:fixed;z-index:50;top:0;right:0;width:min(620px,92vw);height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr);border-left:1px solid #343840;background:#0e1014;box-shadow:-24px 0 70px rgba(0,0,0,.45);transform:translateX(105%);transition:transform 160ms ease}.thread-drawer.open{transform:translateX(0)}.thread-drawer-header{display:flex;justify-content:space-between;align-items:center;padding:13px 15px;border-bottom:1px solid #262a31;background:#13161b}.thread-drawer-header strong{font-size:12px}.thread-close{width:30px;height:30px;border:1px solid #353a43;border-radius:7px;background:#1b1e24;color:#c9cdd3;cursor:pointer}.thread-drawer-body{overflow:auto;padding:10px}.thread-panel-title{padding:8px 10px 12px;border-bottom:1px solid #252930}.thread-panel-title span{display:block;color:#7d86ff;font-size:8px;font-weight:900;letter-spacing:.1em}.thread-panel-title strong{display:block;margin-top:3px;font-size:15px}.thread-panel-title small{display:block;margin-top:3px;color:#7c838d;font-size:9px}.thread-empty{padding:30px;text-align:center;color:#777e88}.thread-backdrop{position:fixed;z-index:49;inset:0;background:rgba(0,0,0,.45);opacity:0;visibility:hidden;transition:120ms ease}.thread-backdrop.open{opacity:1;visibility:visible}.export-controls{position:sticky;top:77px;z-index:18;display:grid;gap:9px;margin:0 0 14px;padding:10px;border:1px solid #272b32;border-radius:9px;background:rgba(17,19,24,.96);backdrop-filter:blur(12px)}.export-search-row{display:flex;align-items:center;gap:8px}.export-search{flex:1;min-width:0;padding:8px 10px;border:1px solid #343943;border-radius:7px;outline:none;background:#0d0f13;color:#e3e5e8;font:inherit;font-size:12px}.export-search:focus{border-color:#5865f2}.filter-count{flex:0 0 auto;color:#858c96;font-size:10px;font-variant-numeric:tabular-nums}.export-tabs{display:flex;flex-wrap:wrap;gap:6px}.export-tab{padding:6px 9px;border:1px solid #343943;border-radius:999px;background:#171a20;color:#aeb3ba;cursor:pointer;font-size:10px;font-weight:700}.export-tab.active{border-color:#5865f2;background:rgba(88,101,242,.18);color:#dce0ff}.message.dmh-filter-hidden{display:none!important}.filter-empty{display:none;padding:28px;text-align:center;color:#777e88}.filter-empty.visible{display:block}@media(max-width:700px){.topbar{align-items:flex-start;padding:14px 15px}.export-meta{display:none}.export-controls{top:69px}.layout{padding:12px 8px 50px}.message{grid-template-columns:34px minmax(0,1fr);padding:8px}.avatar{width:32px;height:32px}.embed-fields{grid-template-columns:1fr}.statuses{position:absolute;right:8px;top:7px}.message-header{padding-right:60px}}
 `;
 }
 
@@ -1346,7 +1364,7 @@ function renderExportHtml(chat, messages, threads, options, mediaMap, avatarMap)
   const portable = {
     format: "discord-message-memory-export",
     formatVersion: 1,
-    extensionVersion: "1.3.14",
+    extensionVersion: "1.3.19",
     exportedAt: exportedAtIso,
     chat: { ...chat },
     messages: messages.map(message => portableExportRecord(message, options)),
@@ -1356,9 +1374,10 @@ function renderExportHtml(chat, messages, threads, options, mediaMap, avatarMap)
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} - Discord export</title><script id="dmh-export-data" type="application/json">${safeScriptJson(portable)}</script><style>${exportDocumentCss()}</style></head>
 <body>
 <header class="topbar"><div><h1>${escapeHtml(title)}</h1><p>${escapeHtml(displayChatKind(chat))} · Channel ID ${escapeHtml(chat.channelId)}</p></div><div class="export-meta">${formatNumber(messages.length)} saved messages<br>Exported ${escapeHtml(exportedAt)} by Discord Message Memory</div></header>
-<main class="layout">${threadsIndex}<div class="messages">${messageHtml || '<div class="thread-empty">No saved messages matched the export options.</div>'}</div></main>
+<main class="layout"><section class="export-controls" aria-label="Transcript filters"><div class="export-search-row"><input id="messageSearch" class="export-search" type="search" placeholder="Search message content…" autocomplete="off"><span id="filterCount" class="filter-count"></span></div><div class="export-tabs" role="tablist" aria-label="Message view"><button type="button" class="export-tab active" data-filter="all">All</button><button type="button" class="export-tab" data-filter="images">Only images</button><button type="button" class="export-tab" data-filter="deleted">Only deleted</button><button type="button" class="export-tab" data-filter="edited">Only edited</button><button type="button" class="export-tab" data-filter="changed">Deleted + edited</button></div></section>${threadsIndex}<div class="messages">${messageHtml || '<div class="thread-empty">No saved messages matched the export options.</div>'}</div><div id="filterEmpty" class="filter-empty">No messages match this search/filter.</div></main>
 ${threads.length ? `<div id="threadBackdrop" class="thread-backdrop"></div><aside id="threadDrawer" class="thread-drawer" aria-hidden="true"><div class="thread-drawer-header"><strong>Thread</strong><button id="threadClose" class="thread-close" type="button">×</button></div><div class="thread-drawer-body">${threadPanels}</div></aside>` : ""}
-<script>(function(){document.querySelectorAll('.audio-attachment').forEach(function(box){const audio=box.querySelector('audio');const link=box.querySelector('.audio-download');if(!audio||!link)return;function sync(){const src=audio.currentSrc||audio.src||'';if(src)link.href=src;const saved=Number(box.getAttribute('data-saved-duration'));const savedValid=box.hasAttribute('data-saved-duration')&&Number.isFinite(saved);const actual=Number(audio.duration);const actualValid=Number.isFinite(actual);const duration=actualValid?actual:(savedValid?saved:null);if(duration!==null)link.hidden=!(duration<2);}sync();audio.addEventListener('loadedmetadata',sync,{once:true});link.addEventListener('click',async function(event){const src=audio.currentSrc||audio.src||link.href||'';if(!/^https?:/i.test(src))return;event.preventDefault();try{const response=await fetch(src);if(!response.ok)throw new Error('download failed');const blob=await response.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=link.getAttribute('download')||'audio';document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(url);},30000);}catch{const a=document.createElement('a');a.href=src;a.target='_blank';a.rel='noreferrer';document.body.appendChild(a);a.click();a.remove();}});});})();</script>
+<script>(function(){document.querySelectorAll('.audio-attachment').forEach(function(box){const audio=box.querySelector('audio');const link=box.querySelector('.audio-download');if(!audio||!link)return;function sync(){const src=audio.currentSrc||audio.src||'';if(src)link.href=src;const saved=Number(box.getAttribute('data-saved-duration'));const savedValid=box.hasAttribute('data-saved-duration')&&Number.isFinite(saved);const actual=Number(audio.duration);const actualValid=Number.isFinite(actual);const duration=actualValid?actual:(savedValid?saved:null);if(duration!==null)link.hidden=!(duration<2);}sync();audio.addEventListener('loadedmetadata',sync,{once:true});link.addEventListener('click',async function(event){const src=audio.currentSrc||audio.src||link.href||'';if(!/^https?:/i.test(src)||/discord-message-memory\.local/i.test(src))return;event.preventDefault();try{const response=await fetch(src);if(!response.ok)throw new Error('download failed');const blob=await response.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=link.getAttribute('download')||'audio';document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(url);},30000);}catch{const a=document.createElement('a');a.href=src;a.target='_blank';a.rel='noreferrer';document.body.appendChild(a);a.click();a.remove();}});});})();</script>
+<script>(function(){const input=document.getElementById('messageSearch');const tabs=[...document.querySelectorAll('.export-tab[data-filter]')];const count=document.getElementById('filterCount');const empty=document.getElementById('filterEmpty');if(!input||!tabs.length)return;let mode='all';function eligible(article){if(mode==='images')return article.dataset.hasImage==='true';if(mode==='deleted')return article.dataset.deleted==='true';if(mode==='edited')return article.dataset.edited==='true';if(mode==='changed')return article.dataset.deleted==='true'||article.dataset.edited==='true';return true;}function apply(){const q=input.value.trim().toLowerCase();let shown=0;let total=0;document.querySelectorAll('article.message').forEach(article=>{if(article.closest('[data-thread-panel]'))return;total++;const ok=eligible(article)&&(!q||(article.dataset.search||'').includes(q));article.classList.toggle('dmh-filter-hidden',!ok);if(ok)shown++;});count.textContent=(q||mode!=='all')?shown+' / '+total:total+' messages';empty.classList.toggle('visible',shown===0&&total>0);}input.addEventListener('input',apply);tabs.forEach(tab=>tab.addEventListener('click',()=>{mode=tab.dataset.filter||'all';tabs.forEach(x=>x.classList.toggle('active',x===tab));apply();}));apply();})();</script>
 <script>(function(){const drawer=document.getElementById('threadDrawer');if(!drawer)return;const backdrop=document.getElementById('threadBackdrop');const close=document.getElementById('threadClose');function shut(){drawer.classList.remove('open');backdrop.classList.remove('open');drawer.setAttribute('aria-hidden','true');}function open(id){document.querySelectorAll('[data-thread-panel]').forEach(p=>p.hidden=p.getAttribute('data-thread-panel')!==id);drawer.classList.add('open');backdrop.classList.add('open');drawer.setAttribute('aria-hidden','false');}document.addEventListener('click',e=>{const b=e.target.closest('[data-thread-open]');if(b)open(b.getAttribute('data-thread-open'));});close.addEventListener('click',shut);backdrop.addEventListener('click',shut);document.addEventListener('keydown',e=>{if(e.key==='Escape')shut();});})();</script>
 </body></html>`;
 }
@@ -1375,6 +1394,13 @@ async function collectThreadExports(chat, options) {
   return threads.sort((a, b) => String(a.meta.channelName || "").localeCompare(String(b.meta.channelName || "")));
 }
 
+function mhtmlResourceLocation(kind, key, filename = "resource") {
+  const safeKind = String(kind || "resource").replace(/[^a-z0-9_-]/gi, "-");
+  const safeKey = encodeURIComponent(String(key || "item"));
+  const safeName = encodeURIComponent(String(filename || "resource").replace(/[\\/:*?"<>|\x00-\x1f]/g, "-").slice(0, 120));
+  return `https://discord-message-memory.local/${safeKind}/${safeKey}/${safeName}`;
+}
+
 async function collectEmbeddedMedia(allMessageGroups, options) {
   const jobs = [];
   for (const messages of allMessageGroups) {
@@ -1383,27 +1409,30 @@ async function collectEmbeddedMedia(allMessageGroups, options) {
       attachments.forEach((attachment, index) => {
         if (shouldEmbedAttachment(attachment, options)) jobs.push({ message, attachment, index });
       });
-      if (options.edits && Array.isArray(message.editHistory)) {
-        // Historical attachment metadata is preserved, but cached blobs are keyed to
-        // the live message attachment keys. Current/last known attachment files are
-        // embedded; prior deleted versions still retain their filename metadata.
-      }
     }
   }
 
   const mediaMap = new Map();
+  const resources = [];
   let missing = 0;
-  if (!jobs.length) return { mediaMap, missing };
+  if (!jobs.length) return { mediaMap, resources, missing };
   let done = 0;
-  setExportProgress(0, jobs.length, `Embedding cached attachments (0/${jobs.length})…`);
+  setExportProgress(0, jobs.length, `Collecting cached attachments (0/${jobs.length})…`);
 
   for (const job of jobs) {
     const key = attachmentMediaKey(job.message, job.attachment, job.index);
     try {
       const item = await getMediaItem(key);
       if (item?.blob) {
-        const dataUrl = await blobToDataUrl(item.blob);
-        if (dataUrl) mediaMap.set(key, dataUrl);
+        const filename = job.attachment?.filename || item.filename || "attachment";
+        const location = mhtmlResourceLocation("media", key, filename);
+        mediaMap.set(key, location);
+        resources.push({
+          location,
+          blob: item.blob,
+          contentType: item.contentType || item.blob.type || job.attachment?.contentType || "application/octet-stream",
+          filename
+        });
       } else {
         missing += 1;
       }
@@ -1411,9 +1440,9 @@ async function collectEmbeddedMedia(allMessageGroups, options) {
       missing += 1;
     }
     done += 1;
-    setExportProgress(done, jobs.length, `Embedding cached attachments (${done}/${jobs.length})…`);
+    setExportProgress(done, jobs.length, `Collecting cached attachments (${done}/${jobs.length})…`);
   }
-  return { mediaMap, missing };
+  return { mediaMap, resources, missing };
 }
 
 async function collectEmbeddedAvatars(allMessageGroups) {
@@ -1429,113 +1458,77 @@ async function collectEmbeddedAvatars(allMessageGroups) {
   }
 
   const avatarMap = new Map();
-  if (!urls.length) return avatarMap;
+  const resources = [];
+  if (!urls.length) return { avatarMap, resources };
   let done = 0;
-  setExportProgress(0, urls.length, `Embedding profile pictures (0/${urls.length})…`);
+  setExportProgress(0, urls.length, `Collecting profile pictures (0/${urls.length})…`);
   for (const url of urls) {
     try {
       const response = await fetch(url, { credentials: "omit", cache: "force-cache" });
       if (response.ok) {
         const blob = await response.blob();
-        const dataUrl = await blobToDataUrl(blob);
-        if (dataUrl) avatarMap.set(url, dataUrl);
+        const key = `avatar-${done}-${url}`;
+        const filename = (() => { try { return new URL(url).pathname.split("/").pop() || "avatar"; } catch { return "avatar"; } })();
+        const location = mhtmlResourceLocation("avatar", key, filename);
+        avatarMap.set(url, location);
+        resources.push({ location, blob, contentType: blob.type || "image/png", filename });
       }
     } catch {}
     done += 1;
-    setExportProgress(done, urls.length, `Embedding profile pictures (${done}/${urls.length})…`);
+    setExportProgress(done, urls.length, `Collecting profile pictures (${done}/${urls.length})…`);
   }
-  return avatarMap;
+  return { avatarMap, resources };
 }
 
-function bytesToBase64ForMhtml(bytes) {
+function bytesToBase64ForExport(bytes) {
   let binary = "";
   const step = 0x8000;
   for (let i = 0; i < bytes.length; i += step) binary += String.fromCharCode(...bytes.subarray(i, i + step));
   return btoa(binary);
 }
 
-function wrapBase64ForMhtml(value) {
-  const clean = String(value || "").replace(/\s+/g, "");
-  const lines = [];
-  for (let i = 0; i < clean.length; i += 76) lines.push(clean.slice(i, i + 76));
-  return lines.join("\r\n");
+function wrapMimeBase64(value) {
+  return String(value || "").match(/.{1,76}/g)?.join("\r\n") || "";
 }
 
-function parseExportDataUrl(dataUrl) {
-  const match = String(dataUrl || "").match(/^data:([^;,]*)(;base64)?,(.*)$/s);
-  if (!match) return null;
-  const contentType = match[1] || "application/octet-stream";
-  if (match[2]) return { contentType, base64: String(match[3] || "").replace(/\s+/g, "") };
-  try {
-    const bytes = new TextEncoder().encode(decodeURIComponent(match[3] || ""));
-    return { contentType, base64: bytesToBase64ForMhtml(bytes) };
-  } catch {
-    return null;
-  }
-}
-
-function extensionForMime(type) {
-  const map = {"image/png":"png","image/jpeg":"jpg","image/gif":"gif","image/webp":"webp","image/avif":"avif","image/svg+xml":"svg","video/mp4":"mp4","video/webm":"webm","audio/mpeg":"mp3","audio/ogg":"ogg","audio/wav":"wav","audio/mp4":"m4a","application/pdf":"pdf"};
-  return map[String(type || "").toLowerCase()] || "bin";
-}
-
-function htmlToMhtml(html, title) {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  const exportId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const rootLocation = `https://discord-message-memory.local/export/${exportId}/index.html`;
-  const resources = [];
-  const byDataUrl = new Map();
-  let resourceIndex = 0;
-  for (const element of doc.querySelectorAll('[src^="data:"],[href^="data:"]')) {
-    for (const attr of ["src", "href"]) {
-      const value = element.getAttribute(attr) || "";
-      if (!value.startsWith("data:")) continue;
-      let item = byDataUrl.get(value);
-      if (!item) {
-        const parsed = parseExportDataUrl(value);
-        if (!parsed) continue;
-        resourceIndex += 1;
-        const ext = extensionForMime(parsed.contentType);
-        const location = `https://discord-message-memory.local/export/${exportId}/resource/${resourceIndex}.${ext}`;
-        item = { location, contentType: parsed.contentType, base64: parsed.base64, filename: `resource-${resourceIndex}.${ext}` };
-        byDataUrl.set(value, item);
-        resources.push(item);
-      }
-      element.setAttribute(attr, item.location);
-    }
-  }
-  const htmlText = `<!doctype html>\n${doc.documentElement.outerHTML}`;
-  const htmlBase64 = bytesToBase64ForMhtml(new TextEncoder().encode(htmlText));
-  const boundary = `----=_DiscordMessageMemory_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-  const cleanTitle = String(title || "Discord Message Memory export").replace(/[\r\n]+/g, " ");
-  const chunks = [
+async function buildMhtml(html, resources, title) {
+  const boundary = `----=_DMH_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const rootLocation = "https://discord-message-memory.local/export.html";
+  const lines = [
     `From: <Saved by Discord Message Memory>`,
-    `MIME-Version: 1.0`,
+    `Subject: ${String(title || "Discord Message Memory export").replace(/[\r\n]+/g, " ")}`,
     `Date: ${new Date().toUTCString()}`,
-    `Subject: ${cleanTitle}`,
+    `MIME-Version: 1.0`,
     `Content-Type: multipart/related; type="text/html"; boundary="${boundary}"`,
-    `X-Discord-Message-Memory-Format: 1`,
-    ``,
+    `Snapshot-Content-Location: ${rootLocation}`,
+    "",
     `--${boundary}`,
     `Content-Type: text/html; charset="utf-8"`,
     `Content-Transfer-Encoding: base64`,
     `Content-Location: ${rootLocation}`,
-    ``,
-    wrapBase64ForMhtml(htmlBase64)
+    "",
+    wrapMimeBase64(bytesToBase64ForExport(new TextEncoder().encode(html))),
+    ""
   ];
-  for (const resource of resources) {
-    chunks.push(
+
+  let done = 0;
+  for (const resource of resources || []) {
+    done += 1;
+    setExportProgress(done, Math.max(1, resources.length), `Packing MHTML resources (${done}/${resources.length})…`);
+    const bytes = new Uint8Array(await resource.blob.arrayBuffer());
+    lines.push(
       `--${boundary}`,
-      `Content-Type: ${resource.contentType}`,
+      `Content-Type: ${resource.contentType || resource.blob.type || "application/octet-stream"}`,
       `Content-Transfer-Encoding: base64`,
       `Content-Location: ${resource.location}`,
-      `Content-Disposition: inline; filename="${resource.filename}"`,
-      ``,
-      wrapBase64ForMhtml(resource.base64)
+      `Content-Disposition: inline; filename="${String(resource.filename || "resource").replace(/["\r\n]/g, "-")}"`,
+      "",
+      wrapMimeBase64(bytesToBase64ForExport(bytes)),
+      ""
     );
   }
-  chunks.push(`--${boundary}--`, ``);
-  return chunks.join("\r\n");
+  lines.push(`--${boundary}--`, "");
+  return lines.join("\r\n");
 }
 
 async function runExport() {
@@ -1551,12 +1544,13 @@ async function runExport() {
     const messages = await getSavedChannelMessages(currentExportChat.channelId);
     const threads = await collectThreadExports(currentExportChat, options);
     const groups = [messages, ...threads.map(thread => thread.messages)];
-    const { mediaMap, missing } = await collectEmbeddedMedia(groups, options);
-    const avatarMap = await collectEmbeddedAvatars(groups);
+    const mediaResult = await collectEmbeddedMedia(groups, options);
+    const avatarResult = await collectEmbeddedAvatars(groups);
 
-    setExportProgress(1, 1, "Building single-file MHTML…");
-    const html = renderExportHtml(currentExportChat, messages, threads, options, mediaMap, avatarMap);
-    const mhtml = htmlToMhtml(html, `${displayChatName(currentExportChat)} - Discord Message Memory`);
+    setExportProgress(1, 1, "Building transcript…");
+    const html = renderExportHtml(currentExportChat, messages, threads, options, mediaResult.mediaMap, avatarResult.avatarMap);
+    const resources = [...mediaResult.resources, ...avatarResult.resources];
+    const mhtml = await buildMhtml(html, resources, displayChatName(currentExportChat));
     const blob = new Blob([mhtml], { type: "multipart/related" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
@@ -1570,9 +1564,9 @@ async function runExport() {
 
     setExportProgress(1, 1, `Export ready · ${formatBytes(blob.size)}`);
     startExportButton.textContent = "Export again";
-    if (missing) {
+    if (mediaResult.missing) {
       exportWarning.hidden = false;
-      exportWarning.textContent = `${missing} attachment${missing === 1 ? " was" : "s were"} not cached locally. The export uses the saved Discord link when one is available.`;
+      exportWarning.textContent = `${mediaResult.missing} attachment${mediaResult.missing === 1 ? " was" : "s were"} not cached locally. The export uses the saved Discord link when one is available.`;
     } else {
       exportWarning.hidden = true;
     }
@@ -1600,6 +1594,64 @@ rememberToggle.addEventListener("change", () => {
 
 showingToggle.addEventListener("change", () => {
   chrome.storage.local.set({ showingEnabled: showingToggle.checked });
+});
+
+notificationSoundEnabled.addEventListener("change", () => {
+  chrome.storage.local.set({ notificationSoundEnabled: notificationSoundEnabled.checked });
+});
+
+chooseNotificationSound.addEventListener("click", () => notificationSoundInput.click());
+notificationSoundInput.addEventListener("change", async () => {
+  const file = notificationSoundInput.files?.[0];
+  notificationSoundInput.value = "";
+  if (!file) return;
+  if (file.size > 8 * 1024 * 1024) {
+    notificationSoundStatus.textContent = "That file is larger than the 8 MB custom-sound limit.";
+    return;
+  }
+  try {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(reader.error || new Error("Could not read the audio file."));
+      reader.readAsDataURL(file);
+    });
+    const sound = { name: file.name, type: file.type || "audio/*", size: file.size, dataUrl };
+    await chrome.storage.local.set({ notificationSound: sound });
+    notificationSoundStatus.textContent = `${file.name} · ${formatBytes(file.size)}`;
+  } catch (error) {
+    notificationSoundStatus.textContent = `Could not save sound: ${String(error?.message || error)}`;
+  }
+});
+
+testNotificationSound.addEventListener("click", async () => {
+  testNotificationSound.disabled = true;
+  const oldText = testNotificationSound.textContent;
+  testNotificationSound.textContent = "Playing…";
+  try {
+    const result = await sendBackground({ type: "DMH_PLAY_CUSTOM_SOUND", force: true });
+    if (!result?.ok) throw new Error(result?.error || result?.reason || "Could not play the custom sound.");
+  } catch (error) {
+    notificationSoundStatus.textContent = `Could not play sound: ${String(error?.message || error)}`;
+  } finally {
+    testNotificationSound.disabled = false;
+    testNotificationSound.textContent = oldText;
+  }
+});
+
+resetNotificationSound.addEventListener("click", async () => {
+  await chrome.storage.local.set({ notificationSound: null });
+  notificationSoundStatus.textContent = "No custom sound selected.";
+});
+
+notificationSoundVolume.addEventListener("input", () => {
+  const percent = Math.max(0, Math.min(100, Number(notificationSoundVolume.value || 0)));
+  notificationSoundVolumeValue.value = `${percent}%`;
+  notificationSoundVolumeValue.textContent = `${percent}%`;
+});
+notificationSoundVolume.addEventListener("change", () => {
+  const percent = Math.max(0, Math.min(100, Number(notificationSoundVolume.value || 0)));
+  chrome.storage.local.set({ notificationSoundVolume: percent / 100 });
 });
 
 quickCss.addEventListener("input", () => {
@@ -1645,75 +1697,12 @@ document.getElementById("deleteAll").addEventListener("click", async () => {
   await Promise.all([loadChats(), loadStats()]);
 });
 
-document.getElementById("refreshChats").addEventListener("click", async () => {
-  await sendBackground({ type: "DMH_INVALIDATE_CHAT_CACHE" }).catch(() => {});
-  await Promise.all([loadChats(), loadStats()]);
-});
+document.getElementById("refreshChats").addEventListener("click", () => Promise.all([loadChats(), loadStats()]));
 
 importLocalButton.addEventListener("click", () => { if (!importRunning) importLocalInput.click(); });
 importMemoryButton.addEventListener("click", () => { if (!importRunning) importMemoryInput.click(); });
 importLocalInput.addEventListener("change", () => runImportFiles(importLocalInput.files, "local"));
 importMemoryInput.addEventListener("change", () => runImportFiles(importMemoryInput.files, "memory"));
-
-notificationSoundEnabled.addEventListener("change", async () => {
-  const data = await chrome.storage.local.get({ notificationSoundDataUrl: "" });
-  if (notificationSoundEnabled.checked && !data.notificationSoundDataUrl) {
-    notificationSoundEnabled.checked = false;
-    notificationSoundFile.click();
-    return;
-  }
-  await chrome.storage.local.set({ notificationSoundEnabled: notificationSoundEnabled.checked });
-});
-
-notificationSoundVolume.addEventListener("input", () => {
-  const percent = Math.max(0, Math.min(100, Number(notificationSoundVolume.value || 0)));
-  notificationSoundVolumeValue.textContent = `${Math.round(percent)}%`;
-});
-
-notificationSoundVolume.addEventListener("change", async () => {
-  const percent = Math.max(0, Math.min(100, Number(notificationSoundVolume.value || 0)));
-  await chrome.storage.local.set({ notificationSoundVolume: percent / 100 });
-});
-
-chooseNotificationSound.addEventListener("click", () => notificationSoundFile.click());
-notificationSoundFile.addEventListener("change", async () => {
-  const file = notificationSoundFile.files?.[0];
-  notificationSoundFile.value = "";
-  if (!file) return;
-  if (file.size > 8 * 1024 * 1024) {
-    notificationSoundStatus.textContent = "That audio file is too large. Choose one under 8 MB.";
-    return;
-  }
-  if (file.type && !file.type.startsWith("audio/")) {
-    notificationSoundStatus.textContent = "Choose an audio file.";
-    return;
-  }
-  try {
-    const dataUrl = await fileToDataUrl(file);
-    await chrome.storage.local.set({ notificationSoundDataUrl: dataUrl, notificationSoundName: file.name, notificationSoundEnabled: true });
-    notificationSoundEnabled.checked = true;
-    updateNotificationSoundUi(file.name, dataUrl);
-  } catch (error) {
-    notificationSoundStatus.textContent = `Could not save sound: ${String(error?.message || error)}`;
-  }
-});
-
-testNotificationSound.addEventListener("click", async () => {
-  const data = await chrome.storage.local.get({ notificationSoundDataUrl: "" });
-  if (!data.notificationSoundDataUrl) return;
-  try {
-    const result = await chrome.runtime.sendMessage({ type: "DMH_PLAY_NOTIFICATION_SOUND" });
-    if (!result?.ok) throw new Error(result?.reason || "Playback failed");
-  } catch (error) {
-    notificationSoundStatus.textContent = `Could not play sound: ${String(error?.message || error)}`;
-  }
-});
-
-clearNotificationSound.addEventListener("click", async () => {
-  await chrome.storage.local.set({ notificationSoundEnabled: false, notificationSoundDataUrl: "", notificationSoundName: "" });
-  notificationSoundEnabled.checked = false;
-  updateNotificationSoundUi("", "");
-});
 
 chatSearch.addEventListener("input", renderChats);
 startExportButton.addEventListener("click", runExport);
@@ -1728,17 +1717,30 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.showingEnabled) showingToggle.checked = Boolean(changes.showingEnabled.newValue);
   if (changes.sidebarCollapsed) applySidebarState(Boolean(changes.sidebarCollapsed.newValue));
   if (changes.notificationSoundEnabled) notificationSoundEnabled.checked = Boolean(changes.notificationSoundEnabled.newValue);
-  if (changes.notificationSoundVolume) setNotificationSoundVolumeUi(changes.notificationSoundVolume.newValue);
-  if (changes.notificationSoundDataUrl || changes.notificationSoundName) {
-    chrome.storage.local.get({ notificationSoundDataUrl: "", notificationSoundName: "" }).then(data => updateNotificationSoundUi(data.notificationSoundName, data.notificationSoundDataUrl));
+  if (changes.notificationSoundVolume) {
+    const percent = Math.round(Math.max(0, Math.min(1, Number(changes.notificationSoundVolume.newValue ?? 1))) * 100);
+    notificationSoundVolume.value = String(percent);
+    notificationSoundVolumeValue.value = `${percent}%`;
+    notificationSoundVolumeValue.textContent = `${percent}%`;
+  }
+  if (changes.notificationSound) {
+    const sound = changes.notificationSound.newValue;
+    notificationSoundStatus.textContent = sound?.name ? `${sound.name}${sound.size ? ` · ${formatBytes(sound.size)}` : ""}` : "No custom sound selected.";
   }
 });
 
 (async () => {
   await loadSettings();
-  // Do not make a legacy import-repair scan block the settings page. Saved
-  // chats paint first; the one-time cleanup runs after the initial list/stats
-  // pass has finished.
   await Promise.allSettled([loadChats(), loadStats()]);
-  setTimeout(() => { runLegacyImportRepairOnce(); }, 250);
+
+  // The old-import cleanup can touch a large message store. Run it after the UI
+  // is usable, and only once for installations that predate the repair.
+  setTimeout(async () => {
+    try {
+      const state = await chrome.storage.local.get({ legacyImportRepairVersion: 0 });
+      if (Number(state.legacyImportRepairVersion || 0) >= 1) return;
+      await repairLegacyLocalImportEdits();
+      await chrome.storage.local.set({ legacyImportRepairVersion: 1 });
+    } catch {}
+  }, 500);
 })();

@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const CONTENT_INSTANCE_VERSION = "1.3.17";
+  const CONTENT_INSTANCE_VERSION = "1.3.19";
   if (globalThis.__DMH_CONTENT_INSTANCE_VERSION__ === CONTENT_INSTANCE_VERSION) return;
   globalThis.__DMH_CONTENT_INSTANCE_VERSION__ = CONTENT_INSTANCE_VERSION;
 
@@ -11,8 +11,7 @@
     rememberingEnabled: true,
     showingEnabled: true,
     quickCss: "",
-    notificationSoundEnabled: false,
-    notificationSoundDataUrl: ""
+    notificationSoundEnabled: false
   };
 
   let settings = { ...SETTINGS_DEFAULTS };
@@ -518,6 +517,22 @@
     delete root.dataset.dmhEditRenderKey;
   }
 
+  function protectMemoryText(node, value, kind = "message") {
+    if (!(node instanceof Element)) return;
+    const text = String(value ?? "");
+    node.classList.add("dmh-original-source-text");
+    node.setAttribute("data-dmh-original-kind", kind);
+    node.setAttribute("data-dmh-injected", "true");
+    // Always build Message Memory's restored/history UI from the canonical Flux
+    // payload rather than snapshotHtml, because another extension may already
+    // have rewritten Discord's rendered DOM before we captured that snapshot.
+    // Keep this as a normal text node on purpose: a livestream/privacy filter
+    // that is currently enabled can still rewrite our injected row too. That
+    // means Message Memory never bypasses the user's active filter, but when the
+    // filter is off the row starts from the real saved Discord text.
+    node.textContent = text;
+  }
+
   function renderEditHistory(root, record) {
     const history = Array.isArray(record.editHistory) ? record.editHistory : [];
     if (!history.length) {
@@ -570,7 +585,7 @@
 
       const body = document.createElement("span");
       body.className = "dmh-edit-content";
-      body.textContent = edit.content || "";
+      protectMemoryText(body, edit.content || "", "edit");
       entry.appendChild(body);
 
       const time = document.createElement("span");
@@ -764,7 +779,7 @@
     const content = document.createElement("div");
     content.id = `message-content-${record.id}`;
     content.className = "dmh-message-content";
-    content.textContent = record.content || "";
+    if (record.content) protectMemoryText(content, record.content, "deleted");
     if (!record.content && Array.isArray(record.links) && record.links.length) {
       for (const item of record.links) {
         const raw = typeof item === "string" ? item : item?.url;
@@ -823,6 +838,15 @@
           root.setAttribute("data-deleted", "true");
           root.classList.add("messagelogger-deleted");
           addDeletedBadge(root);
+          // snapshotHtml comes from Discord's rendered DOM and may already have
+          // been changed by a separate livestream/privacy text filter. Re-seed
+          // only our restored copy from the canonical Flux payload. We deliberately
+          // leave it as ordinary DOM text so an active filter can still transform
+          // the restored row; native live Discord rows are never touched here.
+          if (record.content) {
+            const restoredContent = root.querySelector(`[id^="message-content-${CSS.escape(String(record.id))}"]`) || root.querySelector('[id^="message-content-"]');
+            if (restoredContent) protectMemoryText(restoredContent, record.content, "deleted");
+          }
           renderEditHistory(root, record);
           markDeletedAttachments(root, record);
           hydrateCachedAttachments(root, record);
@@ -1157,9 +1181,8 @@
     if (event.source !== window || event.data?.source !== PAGE_SOURCE) return;
     const data = event.data;
     if (data.type === "DISCORD_EVENT") handleDiscordEvent(data);
-    if (data.type === "PLAY_NOTIFICATION_SOUND") {
-      sendBackground({ type: "DMH_PLAY_NOTIFICATION_SOUND" }, false).catch(() => {});
-      return;
+    if (data.type === "CUSTOM_NOTIFICATION_SOUND") {
+      sendBackground({ type: "DMH_PLAY_CUSTOM_SOUND" }).catch(() => {});
     }
     if (data.type === "HOOK_STATUS") {
       lastHookStatusReceivedAt = Date.now();
@@ -1186,19 +1209,19 @@
     if (area !== "local") return;
     let visibilityChanged = false;
     let rememberingChanged = false;
-    let notificationSoundChanged = false;
 
     for (const key of Object.keys(SETTINGS_DEFAULTS)) {
       if (changes[key]) {
         settings[key] = changes[key].newValue ?? SETTINGS_DEFAULTS[key];
         if (key === "showingEnabled") visibilityChanged = true;
         if (key === "rememberingEnabled") rememberingChanged = true;
-        if (key === "notificationSoundEnabled" || key === "notificationSoundDataUrl") notificationSoundChanged = true;
       }
     }
 
     if (changes.quickCss) applyQuickCss();
-    if (notificationSoundChanged) postToPage("SET_NOTIFICATION_SOUND", { enabled: Boolean(settings.notificationSoundEnabled), hasSound: Boolean(settings.notificationSoundDataUrl) });
+    if (changes.notificationSoundEnabled) {
+      postToPage("SET_NOTIFICATION_SOUND_SETTINGS", { enabled: Boolean(settings.notificationSoundEnabled) });
+    }
     if (visibilityChanged || rememberingChanged) {
       postToPage("SET_LIVE_RESTORE_ENABLED", { enabled: Boolean(settings.rememberingEnabled && settings.showingEnabled) });
     }
@@ -1224,7 +1247,7 @@
     // first capture burst. This also repairs malformed v1 databases in-place.
     sendBackground({ type: "DMH_STORAGE_HEALTH" }).catch(() => {});
     postToPage("SET_LIVE_RESTORE_ENABLED", { enabled: Boolean(settings.rememberingEnabled && settings.showingEnabled) });
-    postToPage("SET_NOTIFICATION_SOUND", { enabled: Boolean(settings.notificationSoundEnabled), hasSound: Boolean(settings.notificationSoundDataUrl) });
+    postToPage("SET_NOTIFICATION_SOUND_SETTINGS", { enabled: Boolean(settings.notificationSoundEnabled) });
     postToPage("PING_HOOK");
     postToPage("REQUEST_EVENT_BACKLOG");
 
