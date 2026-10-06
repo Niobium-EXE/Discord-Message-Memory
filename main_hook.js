@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const HOOK_INSTANCE_VERSION = "1.3.21";
+  const HOOK_INSTANCE_VERSION = "1.3.22";
   if (window.__DMH_MAIN_HOOK_VERSION__ === HOOK_INSTANCE_VERSION) return;
   window.__DMH_MAIN_HOOK_VERSION__ = HOOK_INSTANCE_VERSION;
 
