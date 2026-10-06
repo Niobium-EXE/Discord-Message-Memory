@@ -196,10 +196,10 @@
       <div class="export-format-row">
         <label for="exportFormat">Export format</label>
         <select id="exportFormat">
-          <option value="mhtml" selected>MHTML — one file, AV-friendly</option>
-          <option value="html">Interactive HTML — one file, full search</option>
+          <option value="html" selected>Interactive HTML — one file, full search</option>
+          <option value="mhtml">MHTML — one file, AV-friendly</option>
         </select>
-        <p id="exportFormatHelp">MHTML keeps media as MIME parts. Its category tabs work without JavaScript; use Ctrl+F / Cmd+F to search message text.</p>
+        <p id="exportFormatHelp">Interactive HTML is one file and includes live message search plus filter tabs. The filters also have a script-free fallback, so they still work if page JavaScript is blocked.</p>
       </div>
 
       <div class="export-options">
@@ -256,7 +256,7 @@
 
       <div class="dialog-actions export-actions">
         <button value="cancel" class="secondary-button" type="submit">Cancel</button>
-        <button id="startExport" class="primary-button" type="button">Export MHTML</button>
+        <button id="startExport" class="primary-button" type="button">Export interactive HTML</button>
       </div>
     </form>
   </dialog>
