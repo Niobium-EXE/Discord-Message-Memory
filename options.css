@@ -199,6 +199,31 @@ input:focus-visible + .switch { outline: 2px solid #aab3ff; outline-offset: 2px;
   line-height: 1;
 }
 .icon-button:hover { background: #242933; color: #f2f4f7; }
+.export-format-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 7px 10px;
+  align-items: center;
+  margin-top: 18px;
+  padding: 11px;
+  border: 1px solid #292f38;
+  border-radius: 9px;
+  background: #11151b;
+}
+.export-format-row > label { color: #dce0e7; font-size: 11px; font-weight: 750; }
+.export-format-row select {
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid #3a424e;
+  border-radius: 7px;
+  outline: none;
+  background: #0d1015;
+  color: #e3e6eb;
+  font: inherit;
+  font-size: 10px;
+}
+.export-format-row select:focus { border-color: #6773ff; box-shadow: 0 0 0 2px rgba(88,101,242,.16); }
+.export-format-row p { grid-column: 1 / -1; margin: 0; color: #818a97; font-size: 9px; line-height: 1.45; }
 .export-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 18px; }
 .export-option {
   position: relative;
