@@ -419,3 +419,51 @@ input:focus-visible + .switch { outline: 2px solid #aab3ff; outline-offset: 2px;
 
 /* Custom Discord notification sound */
 .notification-card{overflow:hidden}.notification-sound-controls{display:grid;gap:12px;padding:16px 18px;border-top:1px solid var(--border,#2b2f36)}.notification-sound-copy strong{display:block}.notification-sound-copy p{margin:5px 0 0;color:var(--muted,#8e949d);font-size:12px;overflow-wrap:anywhere}.notification-sound-buttons{display:flex;flex-wrap:wrap;gap:8px}.notification-volume-row{display:grid;grid-template-columns:auto minmax(120px,360px) 48px;align-items:center;gap:10px;color:var(--text,#dbdee1);font-size:12px}.notification-volume-row input[type="range"]{width:100%;accent-color:#5865f2}.notification-volume-row output{font-variant-numeric:tabular-nums;text-align:right;color:var(--muted,#949ba4)}
+
+
+/* v1.3.23 - collapsed Advanced settings section */
+.advanced-section {
+  scroll-margin-top: 30px;
+  margin: 8px 0 0;
+  border: 1px solid #282d36;
+  border-radius: 14px;
+  background: #12151b;
+  box-shadow: 0 10px 30px rgba(0,0,0,.12);
+  overflow: hidden;
+}
+.advanced-summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px 20px;
+  cursor: pointer;
+  user-select: none;
+  background: #15181f;
+}
+.advanced-summary::-webkit-details-marker { display: none; }
+.advanced-summary:hover { background: #191d25; }
+.advanced-summary:focus-visible { outline: 2px solid #7882ff; outline-offset: -2px; }
+.advanced-summary .eyebrow { margin-bottom: 5px; }
+.advanced-summary strong { display: block; color: #f6f7f9; font-size: 18px; letter-spacing: -.02em; }
+.advanced-summary p { margin: 5px 0 0; color: #9199a7; font-size: 11px; line-height: 1.5; }
+.advanced-chevron {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  margin-right: 4px;
+  border-right: 2px solid #949ba8;
+  border-bottom: 2px solid #949ba8;
+  transform: rotate(45deg) translate(-2px,-2px);
+  transition: transform 140ms ease;
+}
+.advanced-section[open] .advanced-chevron { transform: rotate(225deg) translate(-1px,-1px); }
+.advanced-content { padding: 22px 20px 4px; border-top: 1px solid #282d36; }
+.advanced-content > .section { margin-bottom: 44px; }
+.advanced-content > .section:last-child { margin-bottom: 18px; }
+
+@media (max-width: 620px) {
+  .advanced-summary { padding: 15px 14px; }
+  .advanced-content { padding: 18px 12px 2px; }
+}

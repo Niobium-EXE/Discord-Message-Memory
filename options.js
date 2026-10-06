@@ -1401,7 +1401,7 @@ function renderExportHtml(chat, messages, threads, options, mediaMap, avatarMap)
   const portable = {
     format: "discord-message-memory-export",
     formatVersion: 1,
-    extensionVersion: "1.3.22",
+    extensionVersion: "1.3.23",
     exportedAt: exportedAtIso,
     chat: { ...chat },
     messages: messages.map(message => portableExportRecord(message, options)),

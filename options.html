@@ -19,10 +19,8 @@
       </div>
       <nav>
         <a href="#general">General</a>
-        <a href="#notifications">Notifications</a>
         <a href="#saved-data">Saved data</a>
-        <a href="#import-data">Import</a>
-        <a href="#quickcss">Live CSS</a>
+        <a href="#advanced">Advanced</a>
       </nav>
       <div class="sidebar-note">All saved Discord data stays in this extension's local browser storage.</div>
     </aside>
@@ -65,6 +63,37 @@
         </div>
       </section>
 
+<section id="saved-data" class="section">
+        <div class="section-heading compact">
+          <div>
+            <span class="eyebrow">STORAGE</span>
+            <h2>Saved chats</h2>
+            <p>Export a saved chat, delete one chat's memory, or erase everything the extension has stored.</p>
+          </div>
+          <button id="deleteAll" class="danger-button" type="button">Delete all saved data</button>
+        </div>
+
+        <div class="card saved-card">
+          <div class="saved-toolbar">
+            <input id="chatSearch" type="search" placeholder="Search by chat, server, or channel ID">
+            <button id="refreshChats" class="secondary-button" type="button">Refresh</button>
+          </div>
+          <div id="chatList" class="chat-list">
+            <div class="empty-state">Loading saved chats…</div>
+          </div>
+        </div>
+      </section>
+
+      <details id="advanced" class="advanced-section">
+        <summary class="advanced-summary">
+          <div>
+            <span class="eyebrow">ADVANCED</span>
+            <strong>Advanced</strong>
+            <p>Notification sound replacement, import tools, and Live CSS.</p>
+          </div>
+          <span class="advanced-chevron" aria-hidden="true"></span>
+        </summary>
+        <div class="advanced-content">
       <section id="notifications" class="section">
         <div class="section-heading compact">
           <div>
@@ -102,27 +131,7 @@
         </div>
       </section>
 
-      <section id="saved-data" class="section">
-        <div class="section-heading compact">
-          <div>
-            <span class="eyebrow">STORAGE</span>
-            <h2>Saved chats</h2>
-            <p>Export a saved chat, delete one chat's memory, or erase everything the extension has stored.</p>
-          </div>
-          <button id="deleteAll" class="danger-button" type="button">Delete all saved data</button>
-        </div>
-
-        <div class="card saved-card">
-          <div class="saved-toolbar">
-            <input id="chatSearch" type="search" placeholder="Search by chat, server, or channel ID">
-            <button id="refreshChats" class="secondary-button" type="button">Refresh</button>
-          </div>
-          <div id="chatList" class="chat-list">
-            <div class="empty-state">Loading saved chats…</div>
-          </div>
-        </div>
-      </section>
-
+      
 
       <section id="import-data" class="section">
         <div class="section-heading compact">
@@ -160,7 +169,9 @@
         </div>
       </section>
 
-      <section id="quickcss" class="section">
+      
+
+<section id="quickcss" class="section">
         <div class="section-heading compact">
           <div>
             <span class="eyebrow">QUICKCSS</span>
@@ -175,10 +186,17 @@
             <span>quick.css</span>
             <span id="cssStatus">Saved</span>
           </div>
-          <textarea id="quickCss" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="/* Example */\n.messagelogger-deleted {\n  border-radius: 12px !important;\n}"></textarea>
+          <textarea id="quickCss" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="/* Example */
+.messagelogger-deleted {
+  border-radius: 12px !important;
+}"></textarea>
           <div class="editor-footer">Tab inserts two spaces. Ctrl+S saves immediately. Changes also auto-save while you type.</div>
         </div>
       </section>
+    
+        </div>
+      </details>
+
     </main>
   </div>
 
