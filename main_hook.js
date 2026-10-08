@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const HOOK_INSTANCE_VERSION = "1.4";
+  const HOOK_INSTANCE_VERSION = "1.4.1";
   if (window.__DMH_MAIN_HOOK_VERSION__ === HOOK_INSTANCE_VERSION) return;
   window.__DMH_MAIN_HOOK_VERSION__ = HOOK_INSTANCE_VERSION;
 
@@ -538,6 +538,11 @@
     const ttsRaw = safeGet(message, "tts");
     const threadRaw = safeGet(message, "thread");
     const callRaw = safeGet(message, "call");
+    // Discord uses a client-generated nonce to connect the optimistic/local
+    // outgoing message to the server-confirmed MESSAGE_CREATE. Preserve it so
+    // storage can replace the temporary id instead of saving two messages.
+    const nonceRaw = safeGet(message, "nonce");
+    const stateRaw = safeGet(message, "state") ?? safeGet(message, "messageState");
 
     let callDurationSecs = null;
     if (callRaw) {
@@ -571,6 +576,8 @@
       call: plain(callRaw) || null,
       callDurationSecs,
       systemEventKind: Number(typeRaw) === 3 ? "call" : null,
+      nonce: nonceRaw == null ? null : String(nonceRaw),
+      messageState: stateRaw == null ? null : String(stateRaw),
       flags: flagsRaw ?? 0,
       type: typeRaw ?? 0,
       pinned: Boolean(pinnedRaw),
@@ -600,6 +607,8 @@
         delete record.callDurationSecs;
         if (Number(typeRaw) !== 3) delete record.systemEventKind;
       }
+      if (nonceRaw === undefined) delete record.nonce;
+      if (stateRaw === undefined) delete record.messageState;
       if (flagsRaw === undefined) delete record.flags;
       if (typeRaw === undefined) delete record.type;
       if (pinnedRaw === undefined) delete record.pinned;

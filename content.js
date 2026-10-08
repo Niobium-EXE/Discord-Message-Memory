@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const CONTENT_INSTANCE_VERSION = "1.4";
+  const CONTENT_INSTANCE_VERSION = "1.4.1";
   if (globalThis.__DMH_CONTENT_INSTANCE_VERSION__ === CONTENT_INSTANCE_VERSION) return;
   globalThis.__DMH_CONTENT_INSTANCE_VERSION__ = CONTENT_INSTANCE_VERSION;
 
@@ -1164,8 +1164,11 @@
         if (eventType === "MESSAGE_UPDATE" && data.previousRecord) {
           await sendBackground({ type: "DMH_UPSERT_MESSAGE", record: data.previousRecord, eventType: "MESSAGE_SNAPSHOT" });
         }
-        await sendBackground({ type: "DMH_UPSERT_MESSAGE", record: data.record, eventType });
+        const upsertResult = await sendBackground({ type: "DMH_UPSERT_MESSAGE", record: data.record, eventType });
         acknowledgeHookEvent(data);
+        if (Array.isArray(upsertResult?.reconciledIds) && upsertResult.reconciledIds.length) {
+          historyCache.delete(data.record.channelId);
+        }
         if (data.record.attachments?.length) {
           sendBackground({ type: "DMH_CACHE_MESSAGE_ATTACHMENTS", channelId: data.record.channelId, id: data.record.id }).catch(() => {});
         }

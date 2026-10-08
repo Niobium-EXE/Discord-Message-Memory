@@ -1,5 +1,5 @@
 const DB_NAME = "discord-message-memory";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const DISCORD_TAB_PATTERNS = [
   "https://discord.com/*",
   "https://ptb.discord.com/*",
@@ -103,6 +103,9 @@ function openDb() {
       }
       if (!messages.indexNames.contains("channelId")) messages.createIndex("channelId", "channelId", { unique: false });
       if (!messages.indexNames.contains("guildId")) messages.createIndex("guildId", "guildId", { unique: false });
+      // Nonce lets us reconcile Discord's optimistic/local outgoing row with the
+      // server-confirmed message id without scanning a large channel history.
+      if (!messages.indexNames.contains("nonce")) messages.createIndex("nonce", "nonce", { unique: false });
 
       let media;
       if (!db.objectStoreNames.contains("media")) {
@@ -182,6 +185,124 @@ function shallowDefinedMerge(base, incoming) {
     if (value !== undefined) out[key] = value;
   }
   return out;
+}
+
+
+function normalizedNonce(value) {
+  if (value === undefined || value === null || value === "") return null;
+  try { return String(value); } catch { return null; }
+}
+
+function recordAuthorId(record) {
+  const value = record?.author?.id;
+  return value === undefined || value === null ? null : String(value);
+}
+
+function recordSelfUserId(record) {
+  const value = record?.channelMeta?.selfUserId;
+  return value === undefined || value === null ? null : String(value);
+}
+
+function isSelfAuthoredRecord(record) {
+  const authorId = recordAuthorId(record);
+  const selfId = recordSelfUserId(record);
+  return Boolean(authorId && selfId && authorId === selfId);
+}
+
+function sameOutgoingAuthor(a, b) {
+  const aa = recordAuthorId(a);
+  const bb = recordAuthorId(b);
+  return Boolean(aa && bb && aa === bb);
+}
+
+function mergeHistoryLists(...lists) {
+  const seen = new Set();
+  const out = [];
+  for (const list of lists) {
+    for (const item of Array.isArray(list) ? list : []) {
+      if (!item) continue;
+      const key = `${item.editedAt || ""}|${item.capturedAt || ""}|${historyItemSignature(item)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(item);
+    }
+  }
+  return out.sort((a, b) => {
+    const aa = Date.parse(a?.editedAt || "") || Number(a?.capturedAt || 0);
+    const bb = Date.parse(b?.editedAt || "") || Number(b?.capturedAt || 0);
+    return aa - bb;
+  });
+}
+
+async function findOutgoingAliases(store, incoming, finalKey) {
+  if (!incoming) return [];
+  const nonce = normalizedNonce(incoming.nonce);
+  if (!nonce) return [];
+
+  const found = new Map();
+  const consider = record => {
+    if (!record?.key || record.key === finalKey) return;
+    if (String(record.channelId || "") !== String(incoming.channelId || "")) return;
+    const recordNonce = normalizedNonce(record.nonce);
+    const idMatchesNonce = String(record.id || "") === nonce;
+    const sameAuthor = sameOutgoingAuthor(record, incoming);
+    const candidateAuthor = recordAuthorId(record);
+    const incomingAuthor = recordAuthorId(incoming);
+    // A DOM fallback snapshot of the optimistic row may not know the author's id,
+    // but Discord commonly uses the nonce itself as that row's temporary id.
+    // For other nonce matches require the same author to avoid ever merging two
+    // unrelated messages that merely happen to expose a nonce.
+    if (candidateAuthor && incomingAuthor && candidateAuthor !== incomingAuthor) return;
+    if (!idMatchesNonce && !sameAuthor) return;
+    if (recordNonce !== nonce && !idMatchesNonce) return;
+    found.set(record.key, record);
+  };
+
+  // Discord commonly uses the local nonce as the optimistic message id. This
+  // lookup also catches a DOM fallback snapshot that was saved before the Flux
+  // MESSAGE_CREATE had a chance to add its nonce field.
+  try { consider(await requestToPromise(store.get(messageKey(incoming.channelId, nonce)))); } catch {}
+
+  // If the optimistic MESSAGE_CREATE was captured normally it will have the same
+  // nonce even when Discord chose a different temporary id.
+  try {
+    const index = store.index("nonce");
+    const matches = await requestToPromise(index.getAll(nonce));
+    for (const record of matches || []) consider(record);
+  } catch {}
+
+  return [...found.values()];
+}
+
+const supersededMessageKeys = new Map();
+function rememberSupersededMessageKey(key) {
+  if (!key) return;
+  const now = Date.now();
+  supersededMessageKeys.set(String(key), now);
+  for (const [candidate, time] of supersededMessageKeys) {
+    if (now - Number(time || 0) > 10 * 60 * 1000) supersededMessageKeys.delete(candidate);
+  }
+}
+
+async function deleteMediaForMessageKeys(keys) {
+  const wanted = [...new Set((keys || []).filter(Boolean).map(String))];
+  if (!wanted.length) return;
+  const db = await openDb();
+  const tx = db.transaction("media", "readwrite");
+  const index = tx.objectStore("media").index("messageKey");
+  for (const key of wanted) {
+    await new Promise((resolve, reject) => {
+      const request = index.openCursor(IDBKeyRange.only(key));
+      request.onerror = () => reject(request.error || new Error("Could not remove superseded media."));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) { resolve(); return; }
+        cursor.delete();
+        cursor.continue();
+      };
+    });
+  }
+  await txDone(tx);
 }
 
 function mergeAuthorData(existing, incoming) {
@@ -309,21 +430,33 @@ async function getMessage(channelId, messageId) {
 async function upsertMessage(incoming, eventType = "MESSAGE_CREATE") {
   if (!incoming?.channelId || !incoming?.id) return { ok: false, reason: "missing-id" };
 
+  incoming = { ...incoming };
+  if (Object.prototype.hasOwnProperty.call(incoming, "nonce")) incoming.nonce = normalizedNonce(incoming.nonce);
+
   const db = await openDb();
   const key = messageKey(incoming.channelId, incoming.id);
   const tx = db.transaction("messages", "readwrite");
   const store = tx.objectStore("messages");
   const old = await requestToPromise(store.get(key));
 
-  let editHistory = Array.isArray(old?.editHistory) ? [...old.editHistory] : [];
-  if (eventType === "MESSAGE_UPDATE" && old) {
-    const contentChanged = incoming.content !== undefined && incoming.content !== old.content;
-    const attachmentChanged = incoming.attachments !== undefined && attachmentSignature(incoming.attachments) !== attachmentSignature(old.attachments);
+  // Discord renders an outgoing message optimistically while the send request is
+  // still pending. The confirmed MESSAGE_CREATE may later arrive under a different
+  // snowflake id. Reconcile by nonce so that slow sends become one stored message,
+  // not a temporary copy plus a confirmed copy.
+  const aliases = eventType === "MESSAGE_CREATE" ? await findOutgoingAliases(store, incoming, key) : [];
+  let aliasBase = null;
+  for (const alias of aliases) aliasBase = shallowDefinedMerge(aliasBase, alias);
+  const base = shallowDefinedMerge(aliasBase, old);
+
+  let editHistory = mergeHistoryLists(aliasBase?.editHistory, old?.editHistory);
+  if (eventType === "MESSAGE_UPDATE" && base) {
+    const contentChanged = incoming.content !== undefined && incoming.content !== base.content;
+    const attachmentChanged = incoming.attachments !== undefined && attachmentSignature(incoming.attachments) !== attachmentSignature(base.attachments);
     if (contentChanged || attachmentChanged) {
       const last = editHistory[editHistory.length - 1];
       const historical = {
-        content: old.content ?? "",
-        attachments: old.attachments || [],
+        content: base.content ?? "",
+        attachments: base.attachments || [],
         editedAt: incoming.editedTimestamp || new Date().toISOString(),
         capturedAt: Date.now()
       };
@@ -333,30 +466,42 @@ async function upsertMessage(incoming, eventType = "MESSAGE_CREATE") {
     }
   }
 
-  const merged = shallowDefinedMerge(old, incoming);
+  const merged = shallowDefinedMerge(base, incoming);
   merged.key = key;
-  merged.channelId = incoming.channelId;
-  merged.id = incoming.id;
-  merged.firstSeenAt = old?.firstSeenAt || Date.now();
+  merged.channelId = String(incoming.channelId);
+  merged.id = String(incoming.id);
+  merged.nonce = normalizedNonce(incoming.nonce ?? base?.nonce);
+  const firstSeenCandidates = [old?.firstSeenAt, ...aliases.map(item => item?.firstSeenAt)].map(Number).filter(Number.isFinite);
+  merged.firstSeenAt = firstSeenCandidates.length ? Math.min(...firstSeenCandidates) : Date.now();
   merged.lastSeenAt = Date.now();
-  if (eventType === "MESSAGE_SNAPSHOT" && old) {
+  if (eventType === "MESSAGE_SNAPSHOT" && base) {
     editHistory = cleanHistoryForLiveSnapshot(editHistory, incoming, merged);
   }
   merged.editHistory = editHistory;
-  merged.deleted = old?.deleted || Boolean(incoming.deleted);
-  merged.deletedAt = incoming.deletedAt || old?.deletedAt || null;
-  merged.snapshotHtml = incoming.snapshotHtml || old?.snapshotHtml || null;
+  merged.deleted = Boolean(old?.deleted || aliases.some(item => item?.deleted) || incoming.deleted);
+  merged.deletedAt = incoming.deletedAt || old?.deletedAt || aliases.find(item => item?.deletedAt)?.deletedAt || null;
+  merged.snapshotHtml = incoming.snapshotHtml || old?.snapshotHtml || aliases.find(item => item?.snapshotHtml)?.snapshotHtml || null;
   merged.attachments = normalizeAttachmentKeys(merged);
   merged.importedOnly = false;
 
   store.put(merged);
+  const reconciledIds = [];
+  const supersededKeys = [];
+  for (const alias of aliases) {
+    if (!alias?.key || alias.key === key) continue;
+    store.delete(alias.key);
+    reconciledIds.push(String(alias.id));
+    supersededKeys.push(String(alias.key));
+    rememberSupersededMessageKey(alias.key);
+  }
   await txDone(tx);
   await upsertChannelMeta(merged);
+  if (supersededKeys.length) deleteMediaForMessageKeys(supersededKeys).catch(() => {});
 
   // Attachment caching is requested separately by the content script. Keeping
   // the metadata transaction fast prevents a slow CDN response from delaying
   // hundreds of message-save acknowledgements during channel seeding.
-  return { ok: true, record: merged };
+  return { ok: true, record: merged, reconciledIds };
 }
 
 async function saveSnapshot(payload) {
@@ -503,6 +648,7 @@ async function cacheSingleAttachment(record, attachment) {
   const url = attachment?.url || attachment?.proxyUrl || attachment?.proxy_url;
   const key = attachment?._dmhMediaKey;
   if (!url || !key) return;
+  if (supersededMessageKeys.has(String(record?.key || ""))) return;
 
   if (mediaJobs.has(key)) return mediaJobs.get(key);
   const job = (async () => {
@@ -522,6 +668,9 @@ async function cacheSingleAttachment(record, attachment) {
         const response = await fetch(url, { credentials: "omit", cache: "no-store" });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const blob = await response.blob();
+        // A slow upload/fetch can finish after Discord has replaced the optimistic
+        // message id. Do not recreate media rows for that superseded message.
+        if (supersededMessageKeys.has(String(record?.key || ""))) return;
         const writeTx = db.transaction("media", "readwrite");
         writeTx.objectStore("media").put({
           key,
