@@ -39,6 +39,14 @@
         <div class="card settings-card">
           <label class="toggle-row">
             <div>
+              <strong>Auto-update from GitHub</strong>
+              <p id="githubUpdateStatus">Off by default. When enabled, Message Memory checks Niobium-EXE/Discord-Message-Memory every hour and automatically downloads a newer source ZIP. Chromium does not allow an unpacked extension to silently overwrite its own installed code, so applying the downloaded ZIP and reloading the extension is still required.</p>
+            </div>
+            <input id="githubAutoUpdateEnabled" type="checkbox">
+            <span class="switch"></span>
+          </label>
+          <label class="toggle-row">
+            <div>
               <strong>Remember messages</strong>
               <p>Save messages, edits, deletions, embeds, and attachment files from server channels, DMs, and group DMs while Discord is running.</p>
             </div>

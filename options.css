@@ -507,3 +507,7 @@ input:focus-visible + .switch { outline: 2px solid #aab3ff; outline-offset: 2px;
   .advanced-summary { padding: 15px 14px; }
   .advanced-content { padding: 18px 12px 2px; }
 }
+
+#githubUpdateStatus.update-ok { color: #65c98b; }
+#githubUpdateStatus.update-warn { color: #f0c36a; }
+#githubUpdateStatus.update-error { color: #ff7377; }

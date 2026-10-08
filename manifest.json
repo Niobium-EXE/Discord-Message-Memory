@@ -2,21 +2,24 @@
   "manifest_version": 3,
   "name": "Discord Message Memory",
   "short_name": "Message Memory",
-  "version": "1.4.4",
+  "version": "1.5",
   "description": "Locally remembers Discord messages, edits, deletions, and attachments and restores them in chat.",
   "minimum_chrome_version": "111",
   "permissions": [
     "storage",
     "unlimitedStorage",
     "scripting",
-    "offscreen"
+    "offscreen",
+    "alarms",
+    "downloads"
   ],
   "host_permissions": [
     "https://discord.com/*",
     "https://ptb.discord.com/*",
     "https://canary.discord.com/*",
     "https://cdn.discordapp.com/*",
-    "https://media.discordapp.net/*"
+    "https://media.discordapp.net/*",
+    "https://raw.githubusercontent.com/*"
   ],
   "background": {
     "service_worker": "background.js"

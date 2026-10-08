@@ -165,3 +165,7 @@ input:focus-visible + .switch { outline: 2px solid #aab3ff; outline-offset: 2px;
   color: #f4cc72;
 }
 .mini-button:disabled { opacity: .55; cursor: default; }
+
+#githubUpdateStatus.update-ok { color: #65c98b; }
+#githubUpdateStatus.update-warn { color: #f0c36a; }
+#githubUpdateStatus.update-error { color: #ff7377; }

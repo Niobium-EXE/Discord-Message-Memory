@@ -1,14 +1,48 @@
 const DEFAULTS = {
   rememberingEnabled: true,
-  showingEnabled: true
+  showingEnabled: true,
+  githubAutoUpdateEnabled: false,
+  githubUpdateStatus: null
 };
 
 const remember = document.getElementById("rememberingEnabled");
 const showing = document.getElementById("showingEnabled");
+const githubAutoUpdate = document.getElementById("githubAutoUpdateEnabled");
+const githubUpdateStatus = document.getElementById("githubUpdateStatus");
 const statusDot = document.getElementById("statusDot");
 const statusText = document.getElementById("statusText");
 const autoScrollButton = document.getElementById("autoScrollHistory");
 const autoScrollStatus = document.getElementById("autoScrollStatus");
+
+
+function renderGithubUpdateStatus(enabled, status) {
+  githubAutoUpdate.checked = Boolean(enabled);
+  githubUpdateStatus.classList.remove("update-ok", "update-warn", "update-error");
+  if (!enabled) {
+    githubUpdateStatus.textContent = "Off by default. Checks the project repo for newer versions.";
+    return;
+  }
+  if (!status) {
+    githubUpdateStatus.textContent = "Enabled · waiting for the first GitHub check…";
+    return;
+  }
+  if (!status.ok) {
+    githubUpdateStatus.classList.add("update-error");
+    githubUpdateStatus.textContent = status.message || status.error || "Could not check GitHub.";
+    return;
+  }
+  if (status.updateAvailable) {
+    githubUpdateStatus.classList.add("update-warn");
+    githubUpdateStatus.textContent = status.state === "downloaded"
+      ? `v${status.remoteVersion} downloaded · apply ZIP + reload`
+      : status.state === "downloading"
+        ? `Downloading v${status.remoteVersion}…`
+        : `v${status.remoteVersion} available`;
+    return;
+  }
+  githubUpdateStatus.classList.add("update-ok");
+  githubUpdateStatus.textContent = status.remoteVersion ? `Up to date · repo v${status.remoteVersion}` : "Up to date.";
+}
 
 async function sendToActiveDiscordTab(message) {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -47,6 +81,7 @@ async function init() {
   const data = await chrome.storage.local.get({ ...DEFAULTS, hookStatus: null });
   remember.checked = Boolean(data.rememberingEnabled);
   showing.checked = Boolean(data.showingEnabled);
+  renderGithubUpdateStatus(Boolean(data.githubAutoUpdateEnabled), data.githubUpdateStatus);
 
   const status = data.hookStatus;
   const fresh = status?.updatedAt && Date.now() - status.updatedAt < 90_000;
@@ -69,6 +104,12 @@ async function init() {
 
   await refreshAutoScrollState();
 }
+
+githubAutoUpdate.addEventListener("change", async () => {
+  const enabled = githubAutoUpdate.checked;
+  renderGithubUpdateStatus(enabled, enabled ? null : DEFAULTS.githubUpdateStatus);
+  await chrome.storage.local.set({ githubAutoUpdateEnabled: enabled });
+});
 
 remember.addEventListener("change", () => {
   chrome.storage.local.set({ rememberingEnabled: remember.checked });
@@ -98,6 +139,15 @@ autoScrollButton.addEventListener("click", async () => {
 
 document.getElementById("openSettings").addEventListener("click", () => {
   chrome.runtime.openOptionsPage();
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  if (changes.githubAutoUpdateEnabled || changes.githubUpdateStatus) {
+    chrome.storage.local.get(DEFAULTS).then(data => {
+      renderGithubUpdateStatus(Boolean(data.githubAutoUpdateEnabled), data.githubUpdateStatus);
+    }).catch(() => {});
+  }
 });
 
 init();
