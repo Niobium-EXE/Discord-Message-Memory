@@ -11,7 +11,6 @@ const DEFAULTS = {
 };
 
 const EXPORT_DB_NAME = "discord-message-memory";
-const EXPORT_DB_VERSION = 2;
 const rememberToggle = document.getElementById("rememberingEnabled");
 const showingToggle = document.getElementById("showingEnabled");
 const quickCss = document.getElementById("quickCss");
@@ -331,14 +330,21 @@ function openExportDb() {
     if (!health?.ok) throw new Error(health?.error || "Message Memory storage is not ready.");
 
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open(EXPORT_DB_NAME, EXPORT_DB_VERSION);
+      const request = indexedDB.open(EXPORT_DB_NAME);
       request.onupgradeneeded = () => {
         // The background worker owns schema creation/migration. If this fires,
         // abort rather than allowing the exporter to create an empty DB.
         try { request.transaction.abort(); } catch {}
         reject(new Error("Storage schema was not initialized by the background worker."));
       };
-      request.onsuccess = () => resolve(request.result);
+      request.onsuccess = () => {
+        const db = request.result;
+        db.onversionchange = () => {
+          try { db.close(); } catch {}
+          exportDbPromise = null;
+        };
+        resolve(db);
+      };
       request.onerror = () => reject(request.error || new Error("Could not open Message Memory storage."));
     });
   })().catch(error => {
@@ -1403,7 +1409,7 @@ function renderExportHtml(chat, messages, threads, options, mediaMap, avatarMap)
   const portable = {
     format: "discord-message-memory-export",
     formatVersion: 1,
-    extensionVersion: "1.4.2",
+    extensionVersion: "1.4.3",
     exportedAt: exportedAtIso,
     chat: { ...chat },
     messages: messages.map(message => portableExportRecord(message, options)),

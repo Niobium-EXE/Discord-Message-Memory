@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const CONTENT_INSTANCE_VERSION = "1.4.2";
+  const CONTENT_INSTANCE_VERSION = "1.4.3";
   if (globalThis.__DMH_CONTENT_INSTANCE_VERSION__ === CONTENT_INSTANCE_VERSION) return;
   globalThis.__DMH_CONTENT_INSTANCE_VERSION__ = CONTENT_INSTANCE_VERSION;
 
