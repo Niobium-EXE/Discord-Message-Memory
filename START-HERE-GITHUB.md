@@ -1,9 +1,9 @@
-# Discord Message Memory v1.5.3: GitHub setup (Windows, beginner version)
+# Discord Message Memory v1.5.4: GitHub setup (Windows, beginner version)
 
 **You do not need to create a new GitHub repository.** Use your existing repository:
 https://github.com/Niobium-EXE/Discord-Message-Memory
 
-This ZIP contains your actual v1.5.3 extension code **and** a workflow that will create a `.crx` file and attach it to GitHub Releases whenever you publish a new release. It will also publish an `update.xml` file on GitHub Pages.
+This ZIP contains your actual v1.5.4 extension code **and** a workflow that will create a `.crx` file and attach it to GitHub Releases whenever you publish a new release. It will also publish an `update.xml` file on GitHub Pages.
 
 > Important: Chrome on Windows generally does NOT permit ordinary users to install and auto-update self-hosted CRX files without an enterprise policy. This GitHub setup will still package/publish the CRX automatically, but do not count on Chrome or Opera GX accepting self-hosted updates. An unpacked ZIP is published as a fallback.
 
@@ -23,7 +23,7 @@ Choose **File > Clone repository**, select **Niobium-EXE/Discord-Message-Memory*
 
 Extract the ZIP from ChatGPT. Open the extracted folder. In GitHub Desktop choose **Repository > Show in Explorer** (sometimes **Open in Explorer**) to open your cloned repo.
 
-Copy **everything INSIDE** the extracted `discord_message_memory_v1.5.3_repo_ready` folder into your repo folder. Choose **Replace files** if Windows asks. Include the `.github` folder, `tools` folder, and all extension files. **Do not put the extracted folder itself inside the repo**.
+Copy **everything INSIDE** the extracted `discord_message_memory_v1.5.4_repo_ready` folder into your repo folder. Choose **Replace files** if Windows asks. Include the `.github` folder, `tools` folder, and all extension files. **Do not put the extracted folder itself inside the repo**.
 
 Correct folder arrangement:
 
@@ -80,7 +80,7 @@ Never publish that secret as a regular repository file or Release asset. If you 
 
 Return to **GitHub Desktop**. It should list changes from the files you just copied.
 
-At the lower left, type a **Summary**, for example `Add v1.5.3 signed release workflow`. Click **Commit to main**, then **Push origin**.
+At the lower left, type a **Summary**, for example `Add v1.5.4 signed release workflow`. Click **Commit to main**, then **Push origin**.
 
 Open the repository website and verify it shows **manifest.json version 1.5.2** and a `.github/workflows/publish-crx.yml` file.
 
@@ -103,8 +103,8 @@ A 404 error **before your first successful release** is normal.
 1. Open https://github.com/Niobium-EXE/Discord-Message-Memory .
 2. In the repository sidebar, find **Releases** (or go to `/releases`).
 3. Click **Draft a new release**.
-4. Click **Choose a tag**, type `v1.5.3`, and choose **Create new tag on publish** targeting `main`.
-5. Title it `Discord Message Memory v1.5.3`.
+4. Click **Choose a tag**, type `v1.5.4`, and choose **Create new tag on publish** targeting `main`.
+5. Title it `Discord Message Memory v1.5.4`.
 6. Optionally add notes such as “Adds GitHub Releases packaging and a permanent update manifest.”
 7. Click **Publish release**.
 
@@ -112,24 +112,24 @@ A 404 error **before your first successful release** is normal.
 
 Go to the **Actions** tab and open **Publish signed Discord Message Memory CRX**. Wait until it finishes successfully (green check). The workflow uploads:
 
-- `Discord-Message-Memory-v1.5.3.crx` under your new GitHub Release.
-- `Discord-Message-Memory-v1.5.3-unpacked.zip` under the same Release.
+- `Discord-Message-Memory-v1.5.4.crx` under your new GitHub Release.
+- `Discord-Message-Memory-v1.5.4-unpacked.zip` under the same Release.
 - A stable public `update.xml` on GitHub Pages.
 
 If the action fails, click the red job and expand the failing step. Common problems are: the repository secret name was mistyped; GitHub Pages was not set to **GitHub Actions**; or the tag version doesn't match the `manifest.json` version.
 
 ## 8. Every time you release a new version
 
-1. Edit your extension source and bump `manifest.json` to the new version (e.g. `1.5.3`). You should also bump the internal version strings in `main_hook.js`, `content.js`, and `options.js` as appropriate.
+1. Edit your extension source and bump `manifest.json` to the new version (e.g. `1.5.5`). You should also bump the internal version strings in `main_hook.js`, `content.js`, and `options.js` as appropriate.
 2. Commit and **Push origin** with GitHub Desktop.
-3. On GitHub, create a **new Release** with tag `v1.5.3`.
+3. On GitHub, create a **new Release** with tag matching the next version, such as `v1.5.5`.
 4. The exact same signing key is loaded from the GitHub secret; the action builds a new `.crx`, adds it to that release, and updates the public `update.xml`.
 
 **Never regenerate or change your signing key.** A changed key creates a different extension ID. A new release must have a **higher version** than the version currently installed in the browser.
 
-## What about the dropdown “Apply packed updates immediately” toggle?
+## What about the Check for updates toggle?
 
-The toggle you already have **does not control whether the browser downloads/installs CRX updates**. An installed packed extension with a supported update channel is checked by the **browser**. The toggle only changes whether Message Memory requests an **immediate reload** after the browser reports that an update has already arrived. Leaving the toggle off doesn't turn the browser's update system off.
+The **Check for updates** toggle requests update checks, but does not automatically call `runtime.reload()` for you. The **Apply packed updates** button lets you explicitly apply a browser-staged update or get the GitHub Release if the browser cannot stage the CRX. The browser may still manage updates itself during its normal lifecycle.
 
 ## What if I'm using Chrome or Opera GX on Windows?
 
@@ -138,7 +138,7 @@ The CRX + XML build pipeline still works, but installing and auto-updating self-
 Remember: a new extension ID has **different local storage**. Back up your saved chats first, and keep the old installation until imports and exports are confirmed.
 
 
-## v1.5.3 — Manually applying a pending packed update
+## v1.5.4 — Manually applying a pending packed update
 
 The **Check for updates** switch is off by default. Turning it on asks a compatible browser to check for a newer packed extension and checks the public GitHub Pages release manifest periodically (every 6 hours). If the browser reports a pending update, the **Apply packed updates → Apply update** button becomes available in the toolbar dropdown and the General settings page. Clicking it explicitly reloads the installed extension to apply the pending CRX.
 
@@ -147,3 +147,10 @@ Turning this switch off stops extension-initiated checks and Message Memory neve
 **Storage safety:** this release retains the `key` and `update_url` from v1.5.2. A normal in-place update to the **same packed extension ID** uses the same IndexedDB/chat storage. Don't remove the old extension or switch to a different extension ID without exporting/importing saved chats first.
 
 On browsers that do not stage GitHub CRX updates themselves, the update button becomes **Get update**, opening the appropriate GitHub Release for manual installation. That fallback never claims to install an extension.
+
+
+## v1.5.4 — Export all saved chats as a ZIP
+
+Open **Message Memory → Settings → Saved chats → Export all chats**. Select HTML (default) or MHTML and any desired advanced export options, then click **Export all chats to ZIP**. Message Memory exports **all saved chats**, ignoring the chat-list search field, and places one standalone transcript file per chat inside the downloaded ZIP. Filenames include the channel ID so repeated chat names remain distinct.
+
+A progress bar shows which chat is currently being prepared. The ZIP is created locally in the browser and the extension's stored messages are not changed. Large backups containing media can take a while; the built-in ZIP writer warns and stops if a ZIP would exceed 4 GB. If it stops, export large chats individually or turn off embedded files, media and videos. To import a backup, extract the ZIP and select the resulting HTML/MHTML transcript files with the existing Message Memory importer.

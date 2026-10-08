@@ -98,7 +98,13 @@
               <span class="info-tip" tabindex="0" data-tip="Export a saved chat, delete one chat's memory, or erase everything Message Memory has stored.">i</span>
             </div>
           </div>
-          <button id="deleteAll" class="danger-button" type="button">Delete all saved data</button>
+          <div class="saved-heading-actions">
+            <div class="setting-title-row">
+              <button id="exportAllChats" class="secondary-button" type="button">Export all chats</button>
+              <span class="info-tip" tabindex="0" data-tip="Export every saved chat to a separate HTML or MHTML file, bundled into one ZIP. Your existing saved history is not changed.">i</span>
+            </div>
+            <button id="deleteAll" class="danger-button" type="button">Delete all saved data</button>
+          </div>
         </div>
 
         <div class="card saved-card">
@@ -345,6 +351,7 @@
   </dialog>
 
   <script src="importer.js"></script>
+  <script src="zip_writer.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

@@ -22,6 +22,7 @@ const quickCss = document.getElementById("quickCss");
 const cssStatus = document.getElementById("cssStatus");
 const chatList = document.getElementById("chatList");
 const chatSearch = document.getElementById("chatSearch");
+const exportAllChatsButton = document.getElementById("exportAllChats");
 const confirmDialog = document.getElementById("confirmDialog");
 const confirmTitle = document.getElementById("confirmTitle");
 const confirmBody = document.getElementById("confirmBody");
@@ -63,6 +64,8 @@ const importProgressBar = document.getElementById("importProgressBar");
 let chats = [];
 let cssSaveTimer = null;
 let currentExportChat = null;
+let exportAllMode = false;
+let bulkExportProgress = null;
 let exportRunning = false;
 let exportDbPromise = null;
 let importRunning = false;
@@ -875,7 +878,12 @@ function shouldEmbedAttachment(attachment, options) {
 
 function setExportProgress(done, total, text) {
   const safeTotal = Math.max(1, total);
-  const percent = Math.max(0, Math.min(100, Math.round((done / safeTotal) * 100)));
+  let percent = Math.max(0, Math.min(100, Math.round((done / safeTotal) * 100)));
+  if (bulkExportProgress) {
+    const { complete, chatIndex, chatTotal, chatName } = bulkExportProgress;
+    percent = Math.max(0, Math.min(100, Math.round((complete + Math.min(1, done / safeTotal) * 0.9) / Math.max(1, chatTotal) * 100)));
+    text = `${chatIndex}/${chatTotal} · ${text} · ${chatName}`;
+  }
   exportProgress.hidden = false;
   exportProgressText.textContent = text;
   exportProgressPercent.textContent = `${percent}%`;
@@ -894,15 +902,17 @@ function resetExportProgress() {
 function updateExportFormatUi() {
   const format = exportFormat?.value === "mhtml" ? "mhtml" : "html";
   if (format === "html") {
-    startExportButton.textContent = "Export interactive HTML";
+    startExportButton.textContent = exportAllMode ? "Export all chats to ZIP" : "Export interactive HTML";
     if (exportFormatHelp) exportFormatHelp.dataset.tip = "Interactive HTML is one file and includes live message search, filter tabs, and the thread drawer. The filter tabs also use hash/CSS fallbacks, so they still work if page JavaScript is blocked.";
   } else {
-    startExportButton.textContent = "Export MHTML";
+    startExportButton.textContent = exportAllMode ? "Export all chats to ZIP" : "Export MHTML";
     if (exportFormatHelp) exportFormatHelp.dataset.tip = "MHTML keeps media as MIME parts. Its category tabs work without JavaScript; use Ctrl+F / Cmd+F to search message text.";
   }
 }
 
 function openExportDialog(chat) {
+  if (exportRunning) return;
+  exportAllMode = false;
   currentExportChat = chat;
   exportTitle.textContent = `Export ${displayChatName(chat)}`;
   exportSubtitle.textContent = `${formatNumber(chat.messageCount)} saved messages · ${formatBytes(chat.mediaBytes)} cached attachments`;
@@ -910,6 +920,20 @@ function openExportDialog(chat) {
   startExportButton.disabled = false;
   const exportAdvanced = document.getElementById("exportAdvanced");
   if (exportAdvanced) exportAdvanced.open = false;
+  updateExportFormatUi();
+  exportDialog.showModal();
+}
+
+function openExportAllDialog() {
+  if (exportRunning || exportDialog.open) return;
+  exportAllMode = true;
+  currentExportChat = null;
+  exportTitle.textContent = "Export all saved chats";
+  exportSubtitle.textContent = "A separate transcript for each chat, bundled in one ZIP. Uses the advanced options below.";
+  resetExportProgress();
+  startExportButton.disabled = false;
+  const advanced = document.getElementById("exportAdvanced");
+  if (advanced) advanced.open = false;
   updateExportFormatUi();
   exportDialog.showModal();
 }
@@ -1522,7 +1546,7 @@ function renderExportHtml(chat, messages, threads, options, mediaMap, avatarMap)
   const portable = {
     format: "discord-message-memory-export",
     formatVersion: 1,
-    extensionVersion: "1.5.3",
+    extensionVersion: "1.5.4",
     exportedAt: exportedAtIso,
     chat: { ...chat },
     messages: messages.map(message => portableExportRecord(message, options)),
@@ -1555,9 +1579,9 @@ ${interactiveScripts}
 </body></html>`;
 }
 
-async function collectThreadExports(chat, options) {
+async function collectThreadExports(chat, options, cachedChannels = null) {
   if (!options.threads) return [];
-  const channels = await getSavedChannels();
+  const channels = cachedChannels || await getSavedChannels();
   const children = channels.filter(channel => String(channel.parentId || "") === String(chat.channelId) && (channel.isThread || [10, 11, 12].includes(Number(channel.channelType))));
   const threads = [];
   for (const meta of children) {
@@ -1712,62 +1736,125 @@ async function buildMhtml(html, resources, title) {
   return lines.join("\r\n");
 }
 
+async function buildExportFile(chat, options, cachedChannels = null) {
+  const messages = dedupeExportMessages(await getSavedChannelMessages(chat.channelId));
+  const rawThreads = await collectThreadExports(chat, options, cachedChannels);
+  const threads = rawThreads.map(thread => ({ ...thread, messages: dedupeExportMessages(thread.messages) }));
+  const groups = [messages, ...threads.map(thread => thread.messages)];
+  const mediaResult = await collectEmbeddedMedia(groups, options);
+  const avatarResult = await collectEmbeddedAvatars(groups, options);
+  setExportProgress(1, 1, "Building transcript…");
+  const html = renderExportHtml(chat, messages, threads, options, mediaResult.mediaMap, avatarResult.avatarMap);
+  const resources = [...mediaResult.resources, ...avatarResult.resources];
+  const extension = options.format === "html" ? "html" : "mhtml";
+  const blob = options.format === "html"
+    ? new Blob([html], { type: "text/html;charset=utf-8" })
+    : new Blob([await buildMhtml(html, resources, displayChatName(chat))], { type: "multipart/related" });
+  return { blob, extension, missing: mediaResult.missing, count: messages.length };
+}
+
+function downloadExportBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  // Some browsers take time to begin a large ZIP download. Don't revoke early.
+  setTimeout(() => URL.revokeObjectURL(url), 5 * 60_000);
+}
+
+function setExportBusy(busy) {
+  startExportButton.disabled = busy;
+  exportAllChatsButton.disabled = busy;
+  for (const button of exportDialog.querySelectorAll('button[value="cancel"], #exportClose')) button.disabled = busy;
+  exportFormat.disabled = busy;
+}
+
 async function runExport() {
-  if (!currentExportChat || exportRunning) return;
+  if (exportRunning || (exportAllMode ? false : !currentExportChat)) return;
   exportRunning = true;
-  startExportButton.disabled = true;
+  setExportBusy(true);
   startExportButton.textContent = "Exporting…";
   resetExportProgress();
   const options = getExportOptions();
-
   try {
     setExportProgress(0, 1, "Reading saved messages…");
-    const rawMessages = await getSavedChannelMessages(currentExportChat.channelId);
-    const messages = dedupeExportMessages(rawMessages);
-    const rawThreads = await collectThreadExports(currentExportChat, options);
-    const threads = rawThreads.map(thread => ({ ...thread, messages: dedupeExportMessages(thread.messages) }));
-    const groups = [messages, ...threads.map(thread => thread.messages)];
-    const mediaResult = await collectEmbeddedMedia(groups, options);
-    const avatarResult = await collectEmbeddedAvatars(groups, options);
-
-    setExportProgress(1, 1, "Building transcript…");
-    const html = renderExportHtml(currentExportChat, messages, threads, options, mediaResult.mediaMap, avatarResult.avatarMap);
-    const resources = [...mediaResult.resources, ...avatarResult.resources];
-    let blob;
-    let extension;
-    if (options.format === "html") {
-      blob = new Blob([html], { type: "text/html;charset=utf-8" });
-      extension = "html";
-    } else {
-      const mhtml = await buildMhtml(html, resources, displayChatName(currentExportChat));
-      blob = new Blob([mhtml], { type: "multipart/related" });
-      extension = "mhtml";
-    }
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
+    const result = await buildExportFile(currentExportChat, options);
     const date = new Date().toISOString().slice(0, 10);
-    anchor.href = url;
-    anchor.download = `${sanitizeFilename(displayChatName(currentExportChat))} - ${date}.${extension}`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 60_000);
-
-    setExportProgress(1, 1, `Export ready · ${formatBytes(blob.size)}`);
-    startExportButton.textContent = options.format === "html" ? "Export interactive HTML again" : "Export MHTML again";
-    if (mediaResult.missing) {
+    downloadExportBlob(result.blob, `${sanitizeFilename(displayChatName(currentExportChat))} - ${date}.${result.extension}`);
+    setExportProgress(1, 1, `Export ready · ${formatBytes(result.blob.size)}`);
+    if (result.missing) {
       exportWarning.hidden = false;
-      exportWarning.textContent = `${mediaResult.missing} attachment${mediaResult.missing === 1 ? " was" : "s were"} not cached locally. The export uses the saved Discord link when one is available.`;
-    } else {
-      exportWarning.hidden = true;
+      exportWarning.textContent = `${result.missing} attachment${result.missing === 1 ? " was" : "s were"} not cached locally. The export uses the saved Discord link when one is available.`;
     }
   } catch (error) {
     exportWarning.hidden = false;
     exportWarning.textContent = `Export failed: ${String(error?.message || error)}`;
-    startExportButton.textContent = options.format === "html" ? "Try interactive HTML again" : "Try MHTML again";
   } finally {
-    startExportButton.disabled = false;
     exportRunning = false;
+    setExportBusy(false);
+    updateExportFormatUi();
+  }
+}
+
+async function runExportAll() {
+  if (exportRunning || !exportAllMode) return;
+  exportRunning = true;
+  setExportBusy(true);
+  startExportButton.textContent = "Creating ZIP…";
+  resetExportProgress();
+  const options = getExportOptions();
+  let missingTotal = 0;
+  try {
+    setExportProgress(0, 1, "Finding saved chats…");
+    // Use exact counts here: the fast saved-chat list can have stale counts or
+    // miss orphan records. Fetching everything also ignores the UI search box.
+    const allChats = await sendBackground({ type: "DMH_LIST_CHATS" });
+    const exportChats = (Array.isArray(allChats) ? allChats : [])
+      .filter(chat => chat?.channelId && Number(chat.messageCount || 0) > 0)
+      .sort((a, b) => displayChatName(a).localeCompare(displayChatName(b)) || String(a.channelId).localeCompare(String(b.channelId)));
+    if (!exportChats.length) throw new Error("There are no saved chat messages to export.");
+    const zip = new DmhZipWriter();
+    const channelCache = options.threads ? await getSavedChannels() : null;
+    const missingByChat = [];
+    const date = new Date().toISOString().slice(0, 10);
+    for (let index = 0; index < exportChats.length; index += 1) {
+      const chat = exportChats[index];
+      bulkExportProgress = { complete: index, chatIndex: index + 1, chatTotal: exportChats.length, chatName: displayChatName(chat) };
+      setExportProgress(0, 1, "Reading messages…");
+      const result = await buildExportFile(chat, options, channelCache);
+      // Channel ID makes names unique even for identical channel/display names.
+      const name = `${sanitizeFilename(displayChatName(chat)).slice(0, 100)} - ${String(chat.channelId).replace(/[^\w-]/g, "-")}.${result.extension}`;
+      setExportProgress(1, 1, "Adding to ZIP…");
+      await zip.add(name, result.blob);
+      if (result.missing) {
+        missingTotal += result.missing;
+        missingByChat.push(`${name}: ${result.missing} missing attachment(s)`);
+      }
+      bulkExportProgress.complete = index + 1;
+      setExportProgress(0, 1, "Chat added to ZIP");
+      // Give the options page a chance to paint the progress after each chat.
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    bulkExportProgress = null;
+    setExportProgress(0, 1, "Finishing ZIP…");
+    const archive = zip.finish();
+    downloadExportBlob(archive, `Discord Message Memory - All chats - ${date}.zip`);
+    setExportProgress(1, 1, `ZIP ready · ${exportChats.length} chats · ${formatBytes(archive.size)}`);
+    if (missingTotal) {
+      exportWarning.hidden = false;
+      exportWarning.textContent = `${missingTotal} attachment(s) were not cached across ${missingByChat.length} chat(s). Available Discord links were preserved.`;
+    }
+  } catch (error) {
+    exportWarning.hidden = false;
+    exportWarning.textContent = `Bulk export failed: ${String(error?.message || error)}. No incomplete ZIP was downloaded. Saved chats were not changed.`;
+  } finally {
+    bulkExportProgress = null;
+    exportRunning = false;
+    setExportBusy(false);
+    updateExportFormatUi();
   }
 }
 
@@ -1916,6 +2003,7 @@ document.getElementById("deleteAll").addEventListener("click", async () => {
 });
 
 document.getElementById("refreshChats").addEventListener("click", () => Promise.all([loadChats(), loadStats()]));
+exportAllChatsButton.addEventListener("click", openExportAllDialog);
 
 importLocalButton.addEventListener("click", () => { if (!importRunning) importLocalInput.click(); });
 importMemoryButton.addEventListener("click", () => { if (!importRunning) importMemoryInput.click(); });
@@ -1924,9 +2012,13 @@ importMemoryInput.addEventListener("change", () => runImportFiles(importMemoryIn
 
 chatSearch.addEventListener("input", renderChats);
 exportFormat?.addEventListener("change", () => { if (!exportRunning) updateExportFormatUi(); });
-startExportButton.addEventListener("click", runExport);
+startExportButton.addEventListener("click", () => exportAllMode ? runExportAll() : runExport());
+exportDialog.addEventListener("cancel", event => { if (exportRunning) event.preventDefault(); });
 exportDialog.addEventListener("close", () => {
-  if (!exportRunning) currentExportChat = null;
+  if (!exportRunning) {
+    currentExportChat = null;
+    exportAllMode = false;
+  }
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {

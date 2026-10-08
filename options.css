@@ -619,3 +619,8 @@ input:focus-visible + .switch { outline: 2px solid #aab3ff; outline-offset: 2px;
 .packed-apply-button { min-width: 106px; }
 
 .packed-apply-row + .toggle-row { border-top: 1px solid #282d36; }
+
+/* v1.5.4: export-all action */
+.saved-heading-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; align-items:center; gap:10px; }
+.saved-heading-actions .setting-title-row { display:inline-flex; align-items:center; gap:5px; }
+@media(max-width:700px) { .saved-heading-actions { justify-content:flex-start; width:100%; } }
