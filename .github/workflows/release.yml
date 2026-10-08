@@ -1,0 +1,74 @@
+name: Publish signed Discord Message Memory CRX
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  packed-release:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Install signer dependency
+        run: python -m pip install 'cryptography>=43,<48'
+
+      - name: Load permanent private signing key
+        env:
+          CRX_PRIVATE_KEY_B64: ${{ secrets.CRX_PRIVATE_KEY_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$CRX_PRIVATE_KEY_B64" ]]; then
+            echo 'CRX_PRIVATE_KEY_B64 secret is missing. See README-PACKED-UPDATES.md.' >&2
+            exit 1
+          fi
+          printf '%s' "$CRX_PRIVATE_KEY_B64" | base64 --decode > "$RUNNER_TEMP/discord-memory.pem"
+          chmod 600 "$RUNNER_TEMP/discord-memory.pem"
+
+      - name: Build signed CRX and update manifest
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          python tools/build_crx_release.py \
+            --repo . \
+            --key "$RUNNER_TEMP/discord-memory.pem" \
+            --out dist \
+            --tag "$RELEASE_TAG"
+
+      - name: Attach CRX and unpacked ZIP to GitHub Release
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" dist/*.crx dist/*-unpacked.zip --clobber
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/pages
+      - id: deploy
+        uses: actions/deploy-pages@v4
