@@ -511,3 +511,104 @@ input:focus-visible + .switch { outline: 2px solid #aab3ff; outline-offset: 2px;
 #githubUpdateStatus.update-ok { color: #65c98b; }
 #githubUpdateStatus.update-warn { color: #f0c36a; }
 #githubUpdateStatus.update-error { color: #ff7377; }
+
+/* v1.5.1 - compact info tips and packed-update controls */
+.heading-title-row,
+.setting-title-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.setting-title-row > label,
+.setting-title-row > strong {
+  color: #f0f2f5;
+  font-size: 13px;
+  font-weight: 650;
+}
+.toggle-row { cursor: default; }
+.toggle-row > .setting-title-row:first-child,
+.toggle-row > div > .setting-title-row:first-child { min-width: 0; }
+.switch-label {
+  position: relative;
+  display: block;
+  width: 38px;
+  height: 22px;
+  cursor: pointer;
+}
+.switch-label input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.toggle-row > div > p[id$="UpdateStatus"] {
+  margin-top: 5px;
+}
+#packedUpdateStatus.update-ok { color: #65c98b; }
+#packedUpdateStatus.update-warn { color: #f0c36a; }
+#packedUpdateStatus.update-error { color: #ff7377; }
+
+/* Let help bubbles escape cards/details instead of being clipped. */
+.settings-card,
+.notification-card,
+.advanced-section,
+.export-advanced { overflow: visible; }
+.advanced-summary,
+.export-advanced-summary { border-radius: inherit; }
+.advanced-section[open] > .advanced-summary,
+.export-advanced[open] > .export-advanced-summary {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+/* General-purpose info bubble. */
+.info-tip {
+  flex: 0 0 auto;
+  position: relative;
+  width: 17px;
+  height: 17px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid #48505d;
+  border-radius: 50%;
+  color: #9ca4b1;
+  background: #151920;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
+}
+.info-tip:hover,
+.info-tip:focus { border-color: #687180; color: #d9dde4; outline: none; }
+.info-tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  z-index: 100;
+  right: -4px;
+  bottom: calc(100% + 8px);
+  width: min(280px, calc(100vw - 52px));
+  padding: 8px 9px;
+  border: 1px solid #3b424d;
+  border-radius: 8px;
+  background: #0d1015;
+  color: #d6dae1;
+  box-shadow: 0 10px 30px rgba(0,0,0,.45);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.45;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(3px);
+  transition: 100ms ease;
+}
+.info-tip:hover::after,
+.info-tip:focus::after { opacity: 1; visibility: visible; transform: translateY(0); }
+
+.export-format-row > .setting-title-row { margin-bottom: 6px; }
+.export-format-row > .setting-title-row > label { color: #afb6c2; font-size: 10px; font-weight: 700; }
+.import-card-copy > .setting-title-row { align-items: flex-start; }
+.editor-topbar .setting-title-row { gap: 6px; color: #7c8492; font-size: 10px; }
+.editor-topbar .info-tip { width: 15px; height: 15px; font-size: 8px; }

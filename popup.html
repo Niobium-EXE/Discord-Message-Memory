@@ -17,39 +17,51 @@
     </header>
 
     <section class="controls">
-      <label class="setting-row">
+      <div class="setting-row">
         <span>
-          <strong>Auto-update from GitHub</strong>
-          <small id="githubUpdateStatus">Off by default. Checks the project repo for newer versions.</small>
+          <span class="setting-title-row">
+            <label for="autoApplyPackedUpdates">Apply packed updates immediately</label>
+            <span class="info-tip" tabindex="0" data-tip="Packed installs update from GitHub Releases through the browser. Off by default: the browser applies updates on its normal reload cycle. Turn this on to reload Message Memory as soon as a downloaded update is ready.">i</span>
+          </span>
+          <small id="packedUpdateStatus">Packed update channel ready.</small>
         </span>
-        <input id="githubAutoUpdateEnabled" type="checkbox">
-        <span class="switch" aria-hidden="true"></span>
-      </label>
+        <label class="switch-label" for="autoApplyPackedUpdates">
+          <input id="autoApplyPackedUpdates" type="checkbox">
+          <span class="switch" aria-hidden="true"></span>
+        </label>
+      </div>
 
-      <label class="setting-row">
-        <span>
-          <strong>Remember messages</strong>
-          <small>Save messages, edits, deletions, and attachments.</small>
+      <div class="setting-row">
+        <span class="setting-title-row">
+          <label for="rememberingEnabled">Remember messages</label>
+          <span class="info-tip" tabindex="0" data-tip="Save messages, edits, deletions, embeds, and attachment files while Discord is running.">i</span>
         </span>
-        <input id="rememberingEnabled" type="checkbox">
-        <span class="switch" aria-hidden="true"></span>
-      </label>
+        <label class="switch-label" for="rememberingEnabled">
+          <input id="rememberingEnabled" type="checkbox">
+          <span class="switch" aria-hidden="true"></span>
+        </label>
+      </div>
 
-      <label class="setting-row">
-        <span>
-          <strong>Show remembered history</strong>
-          <small>Restore deleted messages and show saved edit history.</small>
+      <div class="setting-row">
+        <span class="setting-title-row">
+          <label for="showingEnabled">Show remembered history</label>
+          <span class="info-tip" tabindex="0" data-tip="Restore remembered deleted messages and show saved edit history directly in Discord.">i</span>
         </span>
-        <input id="showingEnabled" type="checkbox">
-        <span class="switch" aria-hidden="true"></span>
-      </label>
+        <label class="switch-label" for="showingEnabled">
+          <input id="showingEnabled" type="checkbox">
+          <span class="switch" aria-hidden="true"></span>
+        </label>
+      </div>
     </section>
 
     <div id="statusText" class="status-text">Checking Discord connection…</div>
 
     <div class="history-scroll-box">
       <div class="history-scroll-copy">
-        <strong>Refresh older history</strong>
+        <span class="setting-title-row">
+          <strong>Refresh older history</strong>
+          <span class="info-tip" tabindex="0" data-tip="Slowly scroll upward through the currently open Discord chat so older messages are loaded, re-snapshotted, and repaired while you do other things.">i</span>
+        </span>
         <small id="autoScrollStatus">Slowly scroll upward through the open chat.</small>
       </div>
       <button id="autoScrollHistory" class="mini-button" type="button">Auto-scroll</button>

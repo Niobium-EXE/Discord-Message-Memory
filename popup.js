@@ -1,47 +1,52 @@
 const DEFAULTS = {
   rememberingEnabled: true,
   showingEnabled: true,
-  githubAutoUpdateEnabled: false,
-  githubUpdateStatus: null
+  autoApplyPackedUpdates: false,
+  packedUpdateStatus: null
 };
 
 const remember = document.getElementById("rememberingEnabled");
 const showing = document.getElementById("showingEnabled");
-const githubAutoUpdate = document.getElementById("githubAutoUpdateEnabled");
-const githubUpdateStatus = document.getElementById("githubUpdateStatus");
+const autoApplyPackedUpdates = document.getElementById("autoApplyPackedUpdates");
+const packedUpdateStatus = document.getElementById("packedUpdateStatus");
 const statusDot = document.getElementById("statusDot");
 const statusText = document.getElementById("statusText");
 const autoScrollButton = document.getElementById("autoScrollHistory");
 const autoScrollStatus = document.getElementById("autoScrollStatus");
 
 
-function renderGithubUpdateStatus(enabled, status) {
-  githubAutoUpdate.checked = Boolean(enabled);
-  githubUpdateStatus.classList.remove("update-ok", "update-warn", "update-error");
-  if (!enabled) {
-    githubUpdateStatus.textContent = "Off by default. Checks the project repo for newer versions.";
+function renderPackedUpdateStatus(enabled, status) {
+  autoApplyPackedUpdates.checked = Boolean(enabled);
+  packedUpdateStatus.classList.remove("update-ok", "update-warn", "update-error");
+  const installedVersion = status?.installedVersion || chrome.runtime.getManifest().version;
+
+  if (status?.state === "applying") {
+    packedUpdateStatus.classList.add("update-warn");
+    packedUpdateStatus.textContent = `Applying${status.remoteVersion ? ` v${status.remoteVersion}` : " update"}…`;
     return;
   }
-  if (!status) {
-    githubUpdateStatus.textContent = "Enabled · waiting for the first GitHub check…";
+  if (status?.state === "available" || status?.updateAvailable) {
+    packedUpdateStatus.classList.add("update-warn");
+    packedUpdateStatus.textContent = enabled
+      ? `v${status.remoteVersion || "new"} ready · applying automatically`
+      : `v${status.remoteVersion || "new"} ready · applies on next reload`;
     return;
   }
-  if (!status.ok) {
-    githubUpdateStatus.classList.add("update-error");
-    githubUpdateStatus.textContent = status.message || status.error || "Could not check GitHub.";
+  if (status && status.ok === false) {
+    packedUpdateStatus.classList.add("update-error");
+    packedUpdateStatus.textContent = status.message || "Packed update check failed.";
     return;
   }
-  if (status.updateAvailable) {
-    githubUpdateStatus.classList.add("update-warn");
-    githubUpdateStatus.textContent = status.state === "downloaded"
-      ? `v${status.remoteVersion} downloaded · apply ZIP + reload`
-      : status.state === "downloading"
-        ? `Downloading v${status.remoteVersion}…`
-        : `v${status.remoteVersion} available`;
+  if (status?.state === "throttled") {
+    packedUpdateStatus.classList.add("update-warn");
+    packedUpdateStatus.textContent = "Update check was throttled by the browser.";
     return;
   }
-  githubUpdateStatus.classList.add("update-ok");
-  githubUpdateStatus.textContent = status.remoteVersion ? `Up to date · repo v${status.remoteVersion}` : "Up to date.";
+
+  packedUpdateStatus.classList.add("update-ok");
+  packedUpdateStatus.textContent = enabled
+    ? `v${installedVersion} · immediate apply enabled`
+    : `v${installedVersion} · normal browser update cycle`;
 }
 
 async function sendToActiveDiscordTab(message) {
@@ -81,7 +86,7 @@ async function init() {
   const data = await chrome.storage.local.get({ ...DEFAULTS, hookStatus: null });
   remember.checked = Boolean(data.rememberingEnabled);
   showing.checked = Boolean(data.showingEnabled);
-  renderGithubUpdateStatus(Boolean(data.githubAutoUpdateEnabled), data.githubUpdateStatus);
+  renderPackedUpdateStatus(Boolean(data.autoApplyPackedUpdates), data.packedUpdateStatus);
 
   const status = data.hookStatus;
   const fresh = status?.updatedAt && Date.now() - status.updatedAt < 90_000;
@@ -105,10 +110,14 @@ async function init() {
   await refreshAutoScrollState();
 }
 
-githubAutoUpdate.addEventListener("change", async () => {
-  const enabled = githubAutoUpdate.checked;
-  renderGithubUpdateStatus(enabled, enabled ? null : DEFAULTS.githubUpdateStatus);
-  await chrome.storage.local.set({ githubAutoUpdateEnabled: enabled });
+autoApplyPackedUpdates.addEventListener("change", async () => {
+  const enabled = autoApplyPackedUpdates.checked;
+  await chrome.storage.local.set({ autoApplyPackedUpdates: enabled });
+  const data = await chrome.storage.local.get(DEFAULTS);
+  renderPackedUpdateStatus(enabled, data.packedUpdateStatus);
+  if (enabled) {
+    chrome.runtime.sendMessage({ type: "DMH_CHECK_PACKED_UPDATE" }).catch(() => {});
+  }
 });
 
 remember.addEventListener("change", () => {
@@ -143,9 +152,9 @@ document.getElementById("openSettings").addEventListener("click", () => {
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
-  if (changes.githubAutoUpdateEnabled || changes.githubUpdateStatus) {
+  if (changes.autoApplyPackedUpdates || changes.packedUpdateStatus) {
     chrome.storage.local.get(DEFAULTS).then(data => {
-      renderGithubUpdateStatus(Boolean(data.githubAutoUpdateEnabled), data.githubUpdateStatus);
+      renderPackedUpdateStatus(Boolean(data.autoApplyPackedUpdates), data.packedUpdateStatus);
     }).catch(() => {});
   }
 });

@@ -2,24 +2,21 @@
   "manifest_version": 3,
   "name": "Discord Message Memory",
   "short_name": "Message Memory",
-  "version": "1.5",
+  "version": "1.5.2",
   "description": "Locally remembers Discord messages, edits, deletions, and attachments and restores them in chat.",
   "minimum_chrome_version": "111",
   "permissions": [
     "storage",
     "unlimitedStorage",
     "scripting",
-    "offscreen",
-    "alarms",
-    "downloads"
+    "offscreen"
   ],
   "host_permissions": [
     "https://discord.com/*",
     "https://ptb.discord.com/*",
     "https://canary.discord.com/*",
     "https://cdn.discordapp.com/*",
-    "https://media.discordapp.net/*",
-    "https://raw.githubusercontent.com/*"
+    "https://media.discordapp.net/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -72,5 +69,7 @@
     "default_icon": "icon32.png",
     "default_title": "Discord Message Memory",
     "default_panel": "options.html"
-  }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlgvJ6Y6ynhqD8ama8gTZ+3zzX0GAWWI5yHZ8Tyobc2fxGvk1xhg1dZT6eveUuEA/nHDQ7rruxREbl1BpuNecSKMM9QErz8PETi63QAX7ILwCwLSCW/L3kdUxhiMo0MRzaHeLmlISVho7WYERDaLOu2LVsqoR/1S1Qalb+3kQF4qrzuNs4jByRnn+CL00ZY9hnux1CeLYaIi/7w0yi+Hew22vRtx6demTjCxF+Ny/yJAmU9Y7sA3vP4qTTEEh2mR7T8wpi7Msc3AWQ917HY860gahh3p0H5fnWBD0dT+mn9ubT5afrBobR90+AR39yyhb47WNv8aQAMCfbtu6US4h1QIDAQAB",
+  "update_url": "https://niobium-exe.github.io/Discord-Message-Memory/update.xml"
 }

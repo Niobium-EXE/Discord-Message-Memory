@@ -169,3 +169,78 @@ input:focus-visible + .switch { outline: 2px solid #aab3ff; outline-offset: 2px;
 #githubUpdateStatus.update-ok { color: #65c98b; }
 #githubUpdateStatus.update-warn { color: #f0c36a; }
 #githubUpdateStatus.update-error { color: #ff7377; }
+
+/* v1.5.1 - info bubbles and packed update controls */
+.controls { overflow: visible; }
+.setting-row { cursor: default; }
+.setting-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.setting-title-row > label,
+.setting-title-row > strong {
+  color: #eef0f4;
+  font-size: 13px;
+  font-weight: 650;
+}
+.switch-label {
+  position: relative;
+  display: block;
+  width: 36px;
+  height: 20px;
+  cursor: pointer;
+}
+.switch-label input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.info-tip {
+  flex: 0 0 auto;
+  position: relative;
+  width: 16px;
+  height: 16px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid #48505d;
+  border-radius: 50%;
+  background: #151920;
+  color: #9ca4b1;
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
+}
+.info-tip:hover,
+.info-tip:focus { border-color: #687180; color: #d9dde4; outline: none; }
+.info-tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  z-index: 100;
+  right: -4px;
+  bottom: calc(100% + 7px);
+  width: 245px;
+  padding: 8px 9px;
+  border: 1px solid #3b424d;
+  border-radius: 8px;
+  background: #0d1015;
+  color: #d6dae1;
+  box-shadow: 0 10px 30px rgba(0,0,0,.5);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(3px);
+  transition: 100ms ease;
+}
+.info-tip:hover::after,
+.info-tip:focus::after { opacity: 1; visibility: visible; transform: translateY(0); }
+#packedUpdateStatus.update-ok { color: #65c98b; }
+#packedUpdateStatus.update-warn { color: #f0c36a; }
+#packedUpdateStatus.update-error { color: #ff7377; }

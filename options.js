@@ -8,15 +8,15 @@ const DEFAULTS = {
   notificationSoundEnabled: false,
   notificationSound: null,
   notificationSoundVolume: 1,
-  githubAutoUpdateEnabled: false,
-  githubUpdateStatus: null
+  autoApplyPackedUpdates: false,
+  packedUpdateStatus: null
 };
 
 const EXPORT_DB_NAME = "discord-message-memory";
 const rememberToggle = document.getElementById("rememberingEnabled");
 const showingToggle = document.getElementById("showingEnabled");
-const githubAutoUpdateToggle = document.getElementById("githubAutoUpdateEnabled");
-const githubUpdateStatus = document.getElementById("githubUpdateStatus");
+const autoApplyPackedUpdatesToggle = document.getElementById("autoApplyPackedUpdates");
+const packedUpdateStatus = document.getElementById("packedUpdateStatus");
 const quickCss = document.getElementById("quickCss");
 const cssStatus = document.getElementById("cssStatus");
 const chatList = document.getElementById("chatList");
@@ -94,38 +94,39 @@ function formatNumber(value) {
   return new Intl.NumberFormat().format(Number(value || 0));
 }
 
-function renderGithubUpdateStatus(enabled, status) {
-  if (!githubAutoUpdateToggle || !githubUpdateStatus) return;
-  githubAutoUpdateToggle.checked = Boolean(enabled);
-  githubUpdateStatus.classList.remove("update-ok", "update-warn", "update-error");
-  if (!enabled) {
-    githubUpdateStatus.textContent = "Off by default. When enabled, Message Memory checks Niobium-EXE/Discord-Message-Memory every hour and automatically downloads a newer source ZIP. Chromium does not allow an unpacked extension to silently overwrite its own installed code, so applying the downloaded ZIP and reloading the extension is still required.";
+function renderPackedUpdateStatus(enabled, status) {
+  if (!autoApplyPackedUpdatesToggle || !packedUpdateStatus) return;
+  autoApplyPackedUpdatesToggle.checked = Boolean(enabled);
+  packedUpdateStatus.classList.remove("update-ok", "update-warn", "update-error");
+
+  const installedVersion = status?.installedVersion || chrome.runtime.getManifest().version;
+  if (status?.state === "applying") {
+    packedUpdateStatus.classList.add("update-warn");
+    packedUpdateStatus.textContent = status.message || `Applying packed update${status.remoteVersion ? ` v${status.remoteVersion}` : ""}…`;
     return;
   }
-  if (!status) {
-    githubUpdateStatus.textContent = "Enabled. Waiting for the first GitHub check…";
+  if (status?.state === "available" || status?.updateAvailable) {
+    packedUpdateStatus.classList.add("update-warn");
+    packedUpdateStatus.textContent = enabled
+      ? `Packed update${status.remoteVersion ? ` v${status.remoteVersion}` : ""} is ready and will be applied automatically.`
+      : `Packed update${status.remoteVersion ? ` v${status.remoteVersion}` : ""} is ready and will apply on the next browser/extension reload.`;
     return;
   }
-  if (!status.ok) {
-    githubUpdateStatus.classList.add("update-error");
-    githubUpdateStatus.textContent = status.message || status.error || "Could not check GitHub.";
+  if (status && status.ok === false) {
+    packedUpdateStatus.classList.add("update-error");
+    packedUpdateStatus.textContent = status.message || status.error || "The browser could not check the packed update channel.";
     return;
   }
-  if (status.updateAvailable) {
-    githubUpdateStatus.classList.add("update-warn");
-    if (status.state === "downloaded") {
-      githubUpdateStatus.textContent = `GitHub v${status.remoteVersion} finished downloading. Apply that ZIP to the unpacked extension and reload it to finish the update.`;
-    } else if (status.state === "downloading") {
-      githubUpdateStatus.textContent = `GitHub v${status.remoteVersion} is downloading now. It will appear in your normal Downloads folder.`;
-    } else {
-      githubUpdateStatus.textContent = `GitHub v${status.remoteVersion} is newer than installed v${status.installedVersion || chrome.runtime.getManifest().version}.`;
-    }
+  if (status?.state === "throttled") {
+    packedUpdateStatus.classList.add("update-warn");
+    packedUpdateStatus.textContent = "The browser recently checked for updates and temporarily throttled another manual check.";
     return;
   }
-  githubUpdateStatus.classList.add("update-ok");
-  githubUpdateStatus.textContent = status.remoteVersion
-    ? `Up to date. Installed v${status.installedVersion || chrome.runtime.getManifest().version}; GitHub is v${status.remoteVersion}.`
-    : "Up to date.";
+
+  packedUpdateStatus.classList.add("update-ok");
+  packedUpdateStatus.textContent = enabled
+    ? `Installed v${installedVersion} · downloaded GitHub Release updates will be applied immediately.`
+    : `Installed v${installedVersion} · packed updates use the browser's normal reload/update cycle.`;
 }
 
 function updateHookStatus(status) {
@@ -154,7 +155,7 @@ async function loadSettings() {
   const data = await chrome.storage.local.get(DEFAULTS);
   rememberToggle.checked = Boolean(data.rememberingEnabled);
   showingToggle.checked = Boolean(data.showingEnabled);
-  renderGithubUpdateStatus(Boolean(data.githubAutoUpdateEnabled), data.githubUpdateStatus);
+  renderPackedUpdateStatus(Boolean(data.autoApplyPackedUpdates), data.packedUpdateStatus);
   quickCss.value = data.quickCss || "";
   applySidebarState(Boolean(data.sidebarCollapsed));
   updateHookStatus(data.hookStatus);
@@ -899,10 +900,10 @@ function updateExportFormatUi() {
   const format = exportFormat?.value === "mhtml" ? "mhtml" : "html";
   if (format === "html") {
     startExportButton.textContent = "Export interactive HTML";
-    if (exportFormatHelp) exportFormatHelp.textContent = "Interactive HTML is one file and includes live message search, filter tabs, and the thread drawer. The filter tabs also use hash/CSS fallbacks, so they still work if page JavaScript is blocked.";
+    if (exportFormatHelp) exportFormatHelp.dataset.tip = "Interactive HTML is one file and includes live message search, filter tabs, and the thread drawer. The filter tabs also use hash/CSS fallbacks, so they still work if page JavaScript is blocked.";
   } else {
     startExportButton.textContent = "Export MHTML";
-    if (exportFormatHelp) exportFormatHelp.textContent = "MHTML keeps media as MIME parts. Its category tabs work without JavaScript; use Ctrl+F / Cmd+F to search message text.";
+    if (exportFormatHelp) exportFormatHelp.dataset.tip = "MHTML keeps media as MIME parts. Its category tabs work without JavaScript; use Ctrl+F / Cmd+F to search message text.";
   }
 }
 
@@ -1526,7 +1527,7 @@ function renderExportHtml(chat, messages, threads, options, mediaMap, avatarMap)
   const portable = {
     format: "discord-message-memory-export",
     formatVersion: 1,
-    extensionVersion: "1.5",
+    extensionVersion: "1.5.2",
     exportedAt: exportedAtIso,
     chat: { ...chat },
     messages: messages.map(message => portableExportRecord(message, options)),
@@ -1783,10 +1784,14 @@ sidebarToggle.addEventListener("click", async () => {
   await chrome.storage.local.set({ sidebarCollapsed: collapsed });
 });
 
-githubAutoUpdateToggle.addEventListener("change", async () => {
-  const enabled = githubAutoUpdateToggle.checked;
-  renderGithubUpdateStatus(enabled, enabled ? null : DEFAULTS.githubUpdateStatus);
-  await chrome.storage.local.set({ githubAutoUpdateEnabled: enabled });
+autoApplyPackedUpdatesToggle.addEventListener("change", async () => {
+  const enabled = autoApplyPackedUpdatesToggle.checked;
+  await chrome.storage.local.set({ autoApplyPackedUpdates: enabled });
+  const data = await chrome.storage.local.get(DEFAULTS);
+  renderPackedUpdateStatus(enabled, data.packedUpdateStatus);
+  if (enabled) {
+    sendBackground({ type: "DMH_CHECK_PACKED_UPDATE" }).catch(() => {});
+  }
 });
 
 rememberToggle.addEventListener("change", () => {
@@ -1917,9 +1922,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.hookStatus) updateHookStatus(changes.hookStatus.newValue);
   if (changes.rememberingEnabled) rememberToggle.checked = Boolean(changes.rememberingEnabled.newValue);
   if (changes.showingEnabled) showingToggle.checked = Boolean(changes.showingEnabled.newValue);
-  if (changes.githubAutoUpdateEnabled || changes.githubUpdateStatus) {
+  if (changes.autoApplyPackedUpdates || changes.packedUpdateStatus) {
     chrome.storage.local.get(DEFAULTS).then(data => {
-      renderGithubUpdateStatus(Boolean(data.githubAutoUpdateEnabled), data.githubUpdateStatus);
+      renderPackedUpdateStatus(Boolean(data.autoApplyPackedUpdates), data.packedUpdateStatus);
     }).catch(() => {});
   }
   if (changes.sidebarCollapsed) applySidebarState(Boolean(changes.sidebarCollapsed.newValue));

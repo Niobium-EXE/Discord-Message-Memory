@@ -30,37 +30,48 @@
         <div class="section-heading">
           <div>
             <span class="eyebrow">GENERAL</span>
-            <h1>Discord Message Memory</h1>
-            <p>Control capture and whether remembered history is drawn back into Discord.</p>
+            <div class="heading-title-row">
+              <h1>Discord Message Memory</h1>
+              <span class="info-tip" tabindex="0" data-tip="Control message capture and whether remembered deleted/edit history is drawn back into Discord.">i</span>
+            </div>
           </div>
           <div id="hookPill" class="hook-pill">Discord hook unknown</div>
         </div>
 
         <div class="card settings-card">
-          <label class="toggle-row">
+          <div class="toggle-row">
             <div>
-              <strong>Auto-update from GitHub</strong>
-              <p id="githubUpdateStatus">Off by default. When enabled, Message Memory checks Niobium-EXE/Discord-Message-Memory every hour and automatically downloads a newer source ZIP. Chromium does not allow an unpacked extension to silently overwrite its own installed code, so applying the downloaded ZIP and reloading the extension is still required.</p>
+              <div class="setting-title-row">
+                <label for="autoApplyPackedUpdates">Apply packed updates immediately</label>
+                <span class="info-tip" tabindex="0" data-tip="Packed CRX installs use GitHub Releases through the browser's built-in extension updater. Off by default: updates wait for the browser's normal extension reload cycle. When enabled, Message Memory reloads itself as soon as the browser reports a downloaded update ready to apply.">i</span>
+              </div>
+              <p id="packedUpdateStatus">Packed update channel ready.</p>
             </div>
-            <input id="githubAutoUpdateEnabled" type="checkbox">
-            <span class="switch"></span>
-          </label>
-          <label class="toggle-row">
-            <div>
-              <strong>Remember messages</strong>
-              <p>Save messages, edits, deletions, embeds, and attachment files from server channels, DMs, and group DMs while Discord is running.</p>
+            <label class="switch-label" for="autoApplyPackedUpdates">
+              <input id="autoApplyPackedUpdates" type="checkbox">
+              <span class="switch"></span>
+            </label>
+          </div>
+          <div class="toggle-row">
+            <div class="setting-title-row">
+              <label for="rememberingEnabled">Remember messages</label>
+              <span class="info-tip" tabindex="0" data-tip="Save messages, edits, deletions, embeds, and attachment files from server channels, DMs, and group DMs while Discord is running.">i</span>
             </div>
-            <input id="rememberingEnabled" type="checkbox">
-            <span class="switch"></span>
-          </label>
-          <label class="toggle-row">
-            <div>
-              <strong>Show remembered history</strong>
-              <p>Restore deleted rows and show previous edit versions directly in the chat.</p>
+            <label class="switch-label" for="rememberingEnabled">
+              <input id="rememberingEnabled" type="checkbox">
+              <span class="switch"></span>
+            </label>
+          </div>
+          <div class="toggle-row">
+            <div class="setting-title-row">
+              <label for="showingEnabled">Show remembered history</label>
+              <span class="info-tip" tabindex="0" data-tip="Restore deleted rows and show saved previous edit versions directly inside Discord.">i</span>
             </div>
-            <input id="showingEnabled" type="checkbox">
-            <span class="switch"></span>
-          </label>
+            <label class="switch-label" for="showingEnabled">
+              <input id="showingEnabled" type="checkbox">
+              <span class="switch"></span>
+            </label>
+          </div>
         </div>
 
         <div id="statsGrid" class="stats-grid">
@@ -75,8 +86,10 @@
         <div class="section-heading compact">
           <div>
             <span class="eyebrow">STORAGE</span>
-            <h2>Saved chats</h2>
-            <p>Export a saved chat, delete one chat's memory, or erase everything the extension has stored.</p>
+            <div class="heading-title-row">
+              <h2>Saved chats</h2>
+              <span class="info-tip" tabindex="0" data-tip="Export a saved chat, delete one chat's memory, or erase everything Message Memory has stored.">i</span>
+            </div>
           </div>
           <button id="deleteAll" class="danger-button" type="button">Delete all saved data</button>
         </div>
@@ -96,8 +109,10 @@
         <summary class="advanced-summary">
           <div>
             <span class="eyebrow">ADVANCED</span>
-            <strong>Advanced</strong>
-            <p>Notification sound replacement, import tools, and Live CSS.</p>
+            <div class="setting-title-row">
+              <strong>Advanced</strong>
+              <span class="info-tip" tabindex="0" data-tip="Contains notification sound replacement, import tools, and Live CSS.">i</span>
+            </div>
           </div>
           <span class="advanced-chevron" aria-hidden="true"></span>
         </summary>
@@ -106,19 +121,23 @@
         <div class="section-heading compact">
           <div>
             <span class="eyebrow">NOTIFICATIONS</span>
-            <h2>Discord notification sound</h2>
-            <p>Replace Discord's regular message ping with a sound stored locally by this extension.</p>
+            <div class="heading-title-row">
+              <h2>Discord notification sound</h2>
+              <span class="info-tip" tabindex="0" data-tip="Replace Discord's regular message ping with a custom sound stored locally by this extension.">i</span>
+            </div>
           </div>
         </div>
         <div class="card notification-card">
-          <label class="toggle-row">
-            <div>
-              <strong>Replace Discord notification sound</strong>
-              <p>Suppress Discord's normal message ping and play the selected sound instead.</p>
+          <div class="toggle-row">
+            <div class="setting-title-row">
+              <label for="notificationSoundEnabled">Replace Discord notification sound</label>
+              <span class="info-tip" tabindex="0" data-tip="Suppress Discord's normal message ping and play the selected custom sound instead.">i</span>
             </div>
-            <input id="notificationSoundEnabled" type="checkbox">
-            <span class="switch"></span>
-          </label>
+            <label class="switch-label" for="notificationSoundEnabled">
+              <input id="notificationSoundEnabled" type="checkbox">
+              <span class="switch"></span>
+            </label>
+          </div>
           <div class="notification-sound-controls">
             <div class="notification-sound-copy">
               <strong>Custom sound file</strong>
@@ -145,16 +164,20 @@
         <div class="section-heading compact">
           <div>
             <span class="eyebrow">IMPORT</span>
-            <h2>Import previous exports</h2>
-            <p>Merge older transcripts into Message Memory without duplicating messages or replacing newer saved data.</p>
+            <div class="heading-title-row">
+              <h2>Import previous exports</h2>
+              <span class="info-tip" tabindex="0" data-tip="Merge older transcripts into Message Memory without intentionally replacing newer saved data. Import repair/deduplication is applied while merging.">i</span>
+            </div>
           </div>
         </div>
 
         <div class="import-grid">
           <div class="card import-card">
             <div class="import-card-copy">
-              <strong>Import from local-discord-exporter</strong>
-              <p>Import one or more <code>.mhtml</code>/<code>.mht</code> archives made by the Local Discord History Exporter. Embedded attachments in the archive are copied into Message Memory's local cache.</p>
+              <div class="setting-title-row">
+                <strong>Import from local-discord-exporter</strong>
+                <span class="info-tip" tabindex="0" data-tip="Import one or more .mhtml/.mht archives made by the Local Discord History Exporter. Embedded attachments in the archive are copied into Message Memory's local cache.">i</span>
+              </div>
             </div>
             <button id="importLocalButton" class="secondary-button" type="button">Choose MHTML exports</button>
             <input id="importLocalInput" type="file" accept=".mhtml,.mht,multipart/related" multiple hidden>
@@ -162,8 +185,10 @@
 
           <div class="card import-card">
             <div class="import-card-copy">
-              <strong>Import from Message Memory</strong>
-              <p>Import one or more single-file <code>.mhtml</code>/<code>.mht</code> transcripts exported by this extension. Older <code>.html</code> exports are still supported.</p>
+              <div class="setting-title-row">
+                <strong>Import from Message Memory</strong>
+                <span class="info-tip" tabindex="0" data-tip="Import one or more single-file .mhtml/.mht transcripts exported by Message Memory. Older .html exports are still supported.">i</span>
+              </div>
             </div>
             <button id="importMemoryButton" class="secondary-button" type="button">Choose Message Memory exports</button>
             <input id="importMemoryInput" type="file" accept=".mhtml,.mht,.html,multipart/related,text/html" multiple hidden>
@@ -183,22 +208,23 @@
         <div class="section-heading compact">
           <div>
             <span class="eyebrow">QUICKCSS</span>
-            <h2>Live CSS</h2>
-            <p>CSS saves automatically and updates every open Discord tab immediately, like a QuickCSS editor.</p>
+            <div class="heading-title-row">
+              <h2>Live CSS</h2>
+              <span class="info-tip" tabindex="0" data-tip="CSS saves automatically and updates every open Discord tab immediately, like a QuickCSS editor.">i</span>
+            </div>
           </div>
           <button id="resetCss" class="secondary-button" type="button">Clear CSS</button>
         </div>
 
         <div class="editor-card">
           <div class="editor-topbar">
-            <span>quick.css</span>
+            <span class="setting-title-row">quick.css <span class="info-tip" tabindex="0" data-tip="Tab inserts two spaces. Ctrl+S saves immediately. Changes also auto-save while you type.">i</span></span>
             <span id="cssStatus">Saved</span>
           </div>
           <textarea id="quickCss" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="/* Example */
 .messagelogger-deleted {
   border-radius: 12px !important;
 }"></textarea>
-          <div class="editor-footer">Tab inserts two spaces. Ctrl+S saves immediately. Changes also auto-save while you type.</div>
         </div>
       </section>
     
@@ -221,20 +247,22 @@
 
       <details id="exportAdvanced" class="export-advanced">
         <summary class="export-advanced-summary">
-          <div>
+          <div class="setting-title-row">
             <strong>Advanced export options</strong>
-            <span>Format, message history, embedded media, files, and threads</span>
+            <span class="info-tip" tabindex="0" data-tip="Controls the one-file export format, message history, embedded media, other files, and saved threads.">i</span>
           </div>
           <span class="export-advanced-chevron" aria-hidden="true"></span>
         </summary>
         <div class="export-advanced-content">
           <div class="export-format-row">
-            <label for="exportFormat">Export format</label>
+            <div class="setting-title-row">
+              <label for="exportFormat">Export format</label>
+              <span id="exportFormatHelp" class="info-tip" tabindex="0" data-tip="Interactive HTML is one file and includes live message search plus filter tabs. The filters also have a script-free fallback, so they still work if page JavaScript is blocked.">i</span>
+            </div>
             <select id="exportFormat">
               <option value="html" selected>Interactive HTML — one file, full search</option>
               <option value="mhtml">MHTML — one file, AV-friendly</option>
             </select>
-            <p id="exportFormatHelp">Interactive HTML is one file and includes live message search plus filter tabs. The filters also have a script-free fallback, so they still work if page JavaScript is blocked.</p>
           </div>
 
           <div class="export-options">

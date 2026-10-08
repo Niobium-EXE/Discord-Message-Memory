@@ -6,12 +6,6 @@ const DISCORD_TAB_PATTERNS = [
   "https://canary.discord.com/*"
 ];
 
-const GITHUB_REPO = "Niobium-EXE/Discord-Message-Memory";
-const GITHUB_BRANCH = "main";
-const GITHUB_MANIFEST_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}/manifest.json`;
-const GITHUB_ARCHIVE_URL = `https://github.com/${GITHUB_REPO}/archive/refs/heads/${GITHUB_BRANCH}.zip`;
-const GITHUB_UPDATE_ALARM = "dmh-github-update-check";
-const GITHUB_UPDATE_INTERVAL_MINUTES = 60;
 
 const DEFAULT_SETTINGS = {
   rememberingEnabled: true,
@@ -21,9 +15,8 @@ const DEFAULT_SETTINGS = {
   notificationSoundEnabled: false,
   notificationSound: null,
   notificationSoundVolume: 1,
-  githubAutoUpdateEnabled: false,
-  githubUpdateStatus: null,
-  githubDownloadedVersion: null
+  autoApplyPackedUpdates: false,
+  packedUpdateStatus: null
 };
 
 const ACTION_ICONS = {
@@ -1016,174 +1009,152 @@ async function reconnectOpenDiscordTabs() {
   } catch {}
 }
 
-function compareExtensionVersions(a, b) {
-  const aa = String(a || "0").split(".").map(part => Number.parseInt(part, 10) || 0);
-  const bb = String(b || "0").split(".").map(part => Number.parseInt(part, 10) || 0);
-  const count = Math.max(aa.length, bb.length, 4);
-  for (let i = 0; i < count; i += 1) {
-    const av = aa[i] || 0;
-    const bv = bb[i] || 0;
-    if (av !== bv) return av > bv ? 1 : -1;
-  }
-  return 0;
-}
-
-function safeVersionFilename(version) {
-  return String(version || "update").replace(/[^0-9A-Za-z._-]+/g, "-");
-}
-
-async function configureGithubUpdateAlarm(enabledValue = null) {
-  let enabled = enabledValue;
-  if (enabled === null) {
-    const data = await chrome.storage.local.get({ githubAutoUpdateEnabled: false });
-    enabled = Boolean(data.githubAutoUpdateEnabled);
-  }
-  try { await chrome.alarms.clear(GITHUB_UPDATE_ALARM); } catch {}
-  if (enabled) {
-    try {
-      chrome.alarms.create(GITHUB_UPDATE_ALARM, {
-        delayInMinutes: GITHUB_UPDATE_INTERVAL_MINUTES,
-        periodInMinutes: GITHUB_UPDATE_INTERVAL_MINUTES
-      });
-    } catch {}
-  }
-}
-
-async function saveGithubUpdateStatus(status) {
-  const value = { ...(status || {}), updatedAt: Date.now() };
-  await chrome.storage.local.set({ githubUpdateStatus: value });
+async function savePackedUpdateStatus(status) {
+  const value = {
+    ...(status || {}),
+    installedVersion: chrome.runtime.getManifest().version,
+    updatedAt: Date.now()
+  };
+  await chrome.storage.local.set({ packedUpdateStatus: value });
   return value;
 }
 
-async function checkGithubUpdate({ forceDownload = false } = {}) {
+async function requestPackedUpdateCheck() {
   const installedVersion = chrome.runtime.getManifest().version;
-  const prefs = await chrome.storage.local.get({
-    githubAutoUpdateEnabled: false,
-    githubDownloadedVersion: null,
-    githubUpdateStatus: null
-  });
+  if (typeof chrome.runtime.requestUpdateCheck !== "function") {
+    return savePackedUpdateStatus({
+      ok: false,
+      state: "unsupported",
+      installedVersion,
+      message: "This browser does not expose packed extension update checks."
+    });
+  }
 
   try {
-    const response = await fetch(`${GITHUB_MANIFEST_URL}?dmh=${Date.now()}`, { cache: "no-store" });
-    if (!response.ok) throw new Error(`GitHub returned HTTP ${response.status}.`);
-    const remoteManifest = await response.json();
-    const remoteVersion = String(remoteManifest?.version || "").trim();
-    if (!remoteVersion) throw new Error("The GitHub manifest does not contain a version.");
+    const result = await chrome.runtime.requestUpdateCheck();
+    const status = result?.status || "no_update";
+    const remoteVersion = result?.version || null;
 
-    const versionComparison = compareExtensionVersions(remoteVersion, installedVersion);
-    const updateAvailable = versionComparison > 0;
-    const enabled = Boolean(prefs.githubAutoUpdateEnabled);
-    let downloadId = null;
-    let state = updateAvailable ? "available" : (versionComparison < 0 ? "repo-behind" : "up-to-date");
-    let message = updateAvailable
-      ? `Version ${remoteVersion} is available on GitHub.`
-      : versionComparison < 0
-        ? `Installed version ${installedVersion} is newer than GitHub version ${remoteVersion}.`
-        : `GitHub is up to date at version ${remoteVersion}.`;
-
-    if (updateAvailable && enabled && (forceDownload || prefs.githubDownloadedVersion !== remoteVersion)) {
-      downloadId = await chrome.downloads.download({
-        url: GITHUB_ARCHIVE_URL,
-        filename: `Discord-Message-Memory-v${safeVersionFilename(remoteVersion)}.zip`,
-        conflictAction: "uniquify",
-        saveAs: false
+    if (status === "update_available") {
+      return savePackedUpdateStatus({
+        ok: true,
+        state: "available",
+        installedVersion,
+        remoteVersion,
+        updateAvailable: true,
+        message: remoteVersion
+          ? `Packed update v${remoteVersion} is available from GitHub Releases.`
+          : "A packed update is available from GitHub Releases."
       });
-      await chrome.storage.local.set({ githubDownloadedVersion: remoteVersion });
-      state = "downloading";
-      message = `Version ${remoteVersion} is downloading. Chromium cannot silently replace an unpacked extension's own files; apply the downloaded ZIP and reload the extension to finish the update.`;
-    } else if (updateAvailable && enabled && prefs.githubDownloadedVersion === remoteVersion) {
-      state = "downloaded";
-      message = `Version ${remoteVersion} was already downloaded. Apply that ZIP to the unpacked extension and reload it to finish the update.`;
-    } else if (updateAvailable && !enabled) {
-      message = `Version ${remoteVersion} is available on GitHub. Turn on GitHub auto-update to download it automatically.`;
     }
 
-    return saveGithubUpdateStatus({
+    if (status === "throttled") {
+      return savePackedUpdateStatus({
+        ok: true,
+        state: "throttled",
+        installedVersion,
+        remoteVersion: null,
+        updateAvailable: false,
+        message: "The browser recently checked for updates and temporarily throttled another manual check."
+      });
+    }
+
+    return savePackedUpdateStatus({
       ok: true,
-      state,
+      state: "up-to-date",
       installedVersion,
-      remoteVersion,
-      updateAvailable,
-      enabled,
-      downloadId,
-      checkedAt: Date.now(),
-      message
+      remoteVersion: null,
+      updateAvailable: false,
+      message: `No newer packed update is currently available. Installed v${installedVersion}.`
     });
   } catch (error) {
-    return saveGithubUpdateStatus({
+    return savePackedUpdateStatus({
       ok: false,
       state: "error",
       installedVersion,
-      remoteVersion: prefs.githubUpdateStatus?.remoteVersion || null,
-      updateAvailable: Boolean(prefs.githubUpdateStatus?.updateAvailable),
-      enabled: Boolean(prefs.githubAutoUpdateEnabled),
-      checkedAt: Date.now(),
+      updateAvailable: false,
       error: String(error?.message || error),
-      message: `Could not check GitHub: ${String(error?.message || error)}`
+      message: `Could not ask the browser to check for a packed update: ${String(error?.message || error)}`
     });
   }
 }
 
-chrome.runtime.onInstalled.addListener(async () => {
+async function applyPackedUpdateIfEnabled(version = null) {
+  const data = await chrome.storage.local.get({ autoApplyPackedUpdates: false });
+  const enabled = Boolean(data.autoApplyPackedUpdates);
+
+  const status = await savePackedUpdateStatus({
+    ok: true,
+    state: enabled ? "applying" : "available",
+    remoteVersion: version || null,
+    updateAvailable: true,
+    autoApplyEnabled: enabled,
+    message: enabled
+      ? `Packed update${version ? ` v${version}` : ""} is ready and Message Memory is reloading to apply it.`
+      : `Packed update${version ? ` v${version}` : ""} is ready. It will be applied when the browser next reloads the extension.`
+  });
+
+  if (enabled) {
+    setTimeout(() => {
+      try { chrome.runtime.reload(); } catch {}
+    }, 250);
+  }
+  return status;
+}
+
+chrome.runtime.onInstalled.addListener(async details => {
   const current = await chrome.storage.local.get(Object.keys(DEFAULT_SETTINGS));
   const missing = {};
   for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
     if (current[key] === undefined) missing[key] = value;
   }
   if (Object.keys(missing).length) await chrome.storage.local.set(missing);
+
+  const installedVersion = chrome.runtime.getManifest().version;
+  if (details?.reason === "update") {
+    await savePackedUpdateStatus({
+      ok: true,
+      state: "up-to-date",
+      installedVersion,
+      updateAvailable: false,
+      previousVersion: details.previousVersion || null,
+      message: details.previousVersion
+        ? `Updated from v${details.previousVersion} to v${installedVersion}.`
+        : `Updated to v${installedVersion}.`
+    });
+  } else if (details?.reason === "install") {
+    await savePackedUpdateStatus({
+      ok: true,
+      state: "installed",
+      installedVersion,
+      updateAvailable: false,
+      message: `Packed update channel ready. Installed v${installedVersion}.`
+    });
+  }
+
   await syncHookActionIcon();
   await getStorageHealth();
-  await configureGithubUpdateAlarm(Boolean((await chrome.storage.local.get({ githubAutoUpdateEnabled: false })).githubAutoUpdateEnabled));
-  if ((await chrome.storage.local.get({ githubAutoUpdateEnabled: false })).githubAutoUpdateEnabled) checkGithubUpdate().catch(() => {});
   reconnectOpenDiscordTabs();
 });
 
-chrome.runtime.onStartup.addListener(async () => {
+chrome.runtime.onStartup.addListener(() => {
   syncHookActionIcon();
-  const data = await chrome.storage.local.get({ githubAutoUpdateEnabled: false });
-  await configureGithubUpdateAlarm(Boolean(data.githubAutoUpdateEnabled));
-  if (data.githubAutoUpdateEnabled) checkGithubUpdate().catch(() => {});
   reconnectOpenDiscordTabs();
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
   if (changes.hookStatus) setHookActionIcon(changes.hookStatus.newValue || null);
-  if (changes.githubAutoUpdateEnabled) {
-    const enabled = Boolean(changes.githubAutoUpdateEnabled.newValue);
-    configureGithubUpdateAlarm(enabled).catch(() => {});
-    if (enabled) checkGithubUpdate().catch(() => {});
+
+  if (changes.autoApplyPackedUpdates?.newValue === true) {
+    // One immediate check when the user opts in. Normal packed-extension update
+    // checks are still scheduled by the browser itself.
+    requestPackedUpdateCheck().catch(() => {});
   }
 });
 
-chrome.alarms?.onAlarm?.addListener(alarm => {
-  if (alarm?.name !== GITHUB_UPDATE_ALARM) return;
-  chrome.storage.local.get({ githubAutoUpdateEnabled: false }).then(data => {
-    if (data.githubAutoUpdateEnabled) checkGithubUpdate().catch(() => {});
-  }).catch(() => {});
-});
-
-chrome.downloads?.onChanged?.addListener(delta => {
-  if (!delta?.id || !delta.state?.current) return;
-  chrome.storage.local.get({ githubUpdateStatus: null }).then(async data => {
-    const status = data.githubUpdateStatus;
-    if (!status || Number(status.downloadId) !== Number(delta.id)) return;
-    if (delta.state.current === "complete") {
-      await saveGithubUpdateStatus({
-        ...status,
-        state: "downloaded",
-        message: `Version ${status.remoteVersion || "update"} finished downloading. Apply the ZIP to the unpacked extension and reload it to finish the update.`
-      });
-    } else if (delta.state.current === "interrupted") {
-      await saveGithubUpdateStatus({
-        ...status,
-        ok: false,
-        state: "error",
-        error: delta.error?.current || "Download interrupted.",
-        message: `GitHub update download was interrupted${delta.error?.current ? `: ${delta.error.current}` : "."}`
-      });
-    }
-  }).catch(() => {});
+chrome.runtime.onUpdateAvailable?.addListener(details => {
+  applyPackedUpdateIfEnabled(details?.version || null).catch(() => {});
 });
 
 // Service workers can be started for reasons other than install/startup (for
@@ -1227,8 +1198,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return getStorageHealth();
       case "DMH_PLAY_CUSTOM_SOUND":
         return playCustomNotificationSound({ force: Boolean(message.force) });
-      case "DMH_CHECK_GITHUB_UPDATE":
-        return checkGithubUpdate({ forceDownload: Boolean(message.forceDownload) });
+      case "DMH_CHECK_PACKED_UPDATE":
+        return requestPackedUpdateCheck();
       case "DMH_ENSURE_MAIN_HOOK": {
         const tabId = sender?.tab?.id;
         if (!tabId) return { ok: false, reason: "no-tab" };
