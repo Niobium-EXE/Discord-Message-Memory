@@ -42,15 +42,22 @@
           <div class="toggle-row">
             <div>
               <div class="setting-title-row">
-                <label for="autoApplyPackedUpdates">Apply packed updates immediately</label>
-                <span class="info-tip" tabindex="0" data-tip="Packed CRX installs use GitHub Releases through the browser's built-in extension updater. Off by default: updates wait for the browser's normal extension reload cycle. When enabled, Message Memory reloads itself as soon as the browser reports a downloaded update ready to apply.">i</span>
+                <label for="checkForUpdatesEnabled">Check for updates</label>
+                <span class="info-tip" tabindex="0" data-tip="Off by default. When enabled, ask the browser to check for newer packed GitHub Releases. The extension will not automatically reload to apply an update. Chromium may still install updates during its normal browser lifecycle.">i</span>
               </div>
               <p id="packedUpdateStatus">Packed update channel ready.</p>
             </div>
-            <label class="switch-label" for="autoApplyPackedUpdates">
-              <input id="autoApplyPackedUpdates" type="checkbox">
+            <label class="switch-label" for="checkForUpdatesEnabled">
+              <input id="checkForUpdatesEnabled" type="checkbox">
               <span class="switch"></span>
             </label>
+          </div>
+          <div class="packed-apply-row">
+            <div class="setting-title-row">
+              <strong>Apply packed updates</strong>
+              <span class="info-tip" tabindex="0" data-tip="After the browser reports a packed GitHub Release update ready, click Apply update to reload the extension and install it. This is not supported for unpacked installations. Keep the same extension ID to preserve local chat storage.">i</span>
+            </div>
+            <button id="applyPackedUpdate" class="secondary-button packed-apply-button" type="button" disabled>Apply update</button>
           </div>
           <div class="toggle-row">
             <div class="setting-title-row">

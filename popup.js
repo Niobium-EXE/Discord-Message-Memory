@@ -1,13 +1,14 @@
 const DEFAULTS = {
   rememberingEnabled: true,
   showingEnabled: true,
-  autoApplyPackedUpdates: false,
+  checkForUpdatesEnabled: false,
   packedUpdateStatus: null
 };
 
 const remember = document.getElementById("rememberingEnabled");
 const showing = document.getElementById("showingEnabled");
-const autoApplyPackedUpdates = document.getElementById("autoApplyPackedUpdates");
+const checkForUpdatesToggle = document.getElementById("checkForUpdatesEnabled");
+const applyPackedUpdateButton = document.getElementById("applyPackedUpdate");
 const packedUpdateStatus = document.getElementById("packedUpdateStatus");
 const statusDot = document.getElementById("statusDot");
 const statusText = document.getElementById("statusText");
@@ -16,37 +17,30 @@ const autoScrollStatus = document.getElementById("autoScrollStatus");
 
 
 function renderPackedUpdateStatus(enabled, status) {
-  autoApplyPackedUpdates.checked = Boolean(enabled);
+  checkForUpdatesToggle.checked = Boolean(enabled);
   packedUpdateStatus.classList.remove("update-ok", "update-warn", "update-error");
-  const installedVersion = status?.installedVersion || chrome.runtime.getManifest().version;
+  const installedVersion = chrome.runtime.getManifest().version;
+  const ready = Boolean(status?.updateAvailable && status?.installedVersion === installedVersion);
+  applyPackedUpdateButton.disabled = !ready || status?.state === "applying";
+  applyPackedUpdateButton.textContent = status?.state === "applying" ? "Applying…" : status?.applyMode === "manual" ? "Get update" : "Apply update";
 
   if (status?.state === "applying") {
     packedUpdateStatus.classList.add("update-warn");
-    packedUpdateStatus.textContent = `Applying${status.remoteVersion ? ` v${status.remoteVersion}` : " update"}…`;
-    return;
-  }
-  if (status?.state === "available" || status?.updateAvailable) {
+    packedUpdateStatus.textContent = "Applying packed update…";
+  } else if (ready) {
     packedUpdateStatus.classList.add("update-warn");
-    packedUpdateStatus.textContent = enabled
-      ? `v${status.remoteVersion || "new"} ready · applying automatically`
-      : `v${status.remoteVersion || "new"} ready · applies on next reload`;
-    return;
-  }
-  if (status && status.ok === false) {
+    packedUpdateStatus.textContent = status.applyMode === "manual"
+      ? `v${status.remoteVersion || "new"} on GitHub · manual download`
+      : `v${status.remoteVersion || "new"} ready · click Apply update`;
+  } else if (status?.ok === false) {
     packedUpdateStatus.classList.add("update-error");
-    packedUpdateStatus.textContent = status.message || "Packed update check failed.";
-    return;
+    packedUpdateStatus.textContent = status.message || "Update check failed.";
+  } else if (status?.state === "throttled") {
+    packedUpdateStatus.textContent = "Browser check throttled · try later.";
+  } else {
+    packedUpdateStatus.classList.add("update-ok");
+    packedUpdateStatus.textContent = enabled ? `v${installedVersion} · checking enabled` : `v${installedVersion} · checks off`;
   }
-  if (status?.state === "throttled") {
-    packedUpdateStatus.classList.add("update-warn");
-    packedUpdateStatus.textContent = "Update check was throttled by the browser.";
-    return;
-  }
-
-  packedUpdateStatus.classList.add("update-ok");
-  packedUpdateStatus.textContent = enabled
-    ? `v${installedVersion} · immediate apply enabled`
-    : `v${installedVersion} · normal browser update cycle`;
 }
 
 async function sendToActiveDiscordTab(message) {
@@ -86,7 +80,7 @@ async function init() {
   const data = await chrome.storage.local.get({ ...DEFAULTS, hookStatus: null });
   remember.checked = Boolean(data.rememberingEnabled);
   showing.checked = Boolean(data.showingEnabled);
-  renderPackedUpdateStatus(Boolean(data.autoApplyPackedUpdates), data.packedUpdateStatus);
+  renderPackedUpdateStatus(Boolean(data.checkForUpdatesEnabled), data.packedUpdateStatus);
 
   const status = data.hookStatus;
   const fresh = status?.updatedAt && Date.now() - status.updatedAt < 90_000;
@@ -110,13 +104,31 @@ async function init() {
   await refreshAutoScrollState();
 }
 
-autoApplyPackedUpdates.addEventListener("change", async () => {
-  const enabled = autoApplyPackedUpdates.checked;
-  await chrome.storage.local.set({ autoApplyPackedUpdates: enabled });
+checkForUpdatesToggle.addEventListener("change", async () => {
+  const enabled = checkForUpdatesToggle.checked;
+  await chrome.storage.local.set({ checkForUpdatesEnabled: enabled });
   const data = await chrome.storage.local.get(DEFAULTS);
   renderPackedUpdateStatus(enabled, data.packedUpdateStatus);
-  if (enabled) {
-    chrome.runtime.sendMessage({ type: "DMH_CHECK_PACKED_UPDATE" }).catch(() => {});
+});
+
+applyPackedUpdateButton.addEventListener("click", async () => {
+  applyPackedUpdateButton.disabled = true;
+  applyPackedUpdateButton.textContent = "Applying…";
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "DMH_APPLY_PACKED_UPDATE" });
+    if (result?.ok && result?.applyMode === "manual") {
+      const data = await chrome.storage.local.get(DEFAULTS);
+      renderPackedUpdateStatus(Boolean(data.checkForUpdatesEnabled), result);
+      packedUpdateStatus.textContent = "Opened GitHub Release. Install from there manually.";
+    } else if (!result?.ok) {
+      packedUpdateStatus.classList.add("update-error");
+      packedUpdateStatus.textContent = result?.message || result?.error || "No update is ready yet.";
+      const data = await chrome.storage.local.get(DEFAULTS);
+      renderPackedUpdateStatus(Boolean(data.checkForUpdatesEnabled), data.packedUpdateStatus);
+    }
+  } catch (error) {
+    packedUpdateStatus.classList.add("update-error");
+    packedUpdateStatus.textContent = String(error?.message || error);
   }
 });
 
@@ -152,9 +164,9 @@ document.getElementById("openSettings").addEventListener("click", () => {
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
-  if (changes.autoApplyPackedUpdates || changes.packedUpdateStatus) {
+  if (changes.checkForUpdatesEnabled || changes.packedUpdateStatus) {
     chrome.storage.local.get(DEFAULTS).then(data => {
-      renderPackedUpdateStatus(Boolean(data.autoApplyPackedUpdates), data.packedUpdateStatus);
+      renderPackedUpdateStatus(Boolean(data.checkForUpdatesEnabled), data.packedUpdateStatus);
     }).catch(() => {});
   }
 });

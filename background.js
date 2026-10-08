@@ -15,7 +15,7 @@ const DEFAULT_SETTINGS = {
   notificationSoundEnabled: false,
   notificationSound: null,
   notificationSoundVolume: 1,
-  autoApplyPackedUpdates: false,
+  checkForUpdatesEnabled: false,
   packedUpdateStatus: null
 };
 
@@ -1009,6 +1009,72 @@ async function reconnectOpenDiscordTabs() {
   } catch {}
 }
 
+const UPDATE_CHECK_ALARM = "dmh-manual-packed-update-check";
+const UPDATE_CHECK_EVERY_MINUTES = 360;
+const RELEASES_BASE = "https://github.com/Niobium-EXE/Discord-Message-Memory/releases/tag/";
+
+function comparePackedVersions(a, b) {
+  const parts = version => String(version || "0").split(".").map(n => Number.parseInt(n, 10) || 0);
+  const left = parts(a), right = parts(b);
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    if ((left[i] || 0) !== (right[i] || 0)) return (left[i] || 0) > (right[i] || 0) ? 1 : -1;
+  }
+  return 0;
+}
+
+async function fetchPublishedPackedVersion() {
+  const updateUrl = chrome.runtime.getManifest().update_url;
+  if (!updateUrl) return null;
+  const response = await fetch(updateUrl, { cache: "no-store" });
+  if (!response.ok) throw new Error(`GitHub Pages returned HTTP ${response.status}.`);
+  const xml = await response.text();
+  const updateTag = xml.match(/<updatecheck\b([^>]+)>/i);
+  if (!updateTag) throw new Error("GitHub Pages update.xml has no updatecheck entry.");
+  const version = updateTag[1].match(/\bversion\s*=\s*["']([^"']+)["']/i)?.[1] || "";
+  if (!/^\d+(\.\d+){0,3}$/.test(version)) throw new Error("Invalid packed version in update.xml.");
+  return version;
+}
+
+async function checkPublishedPackedRelease() {
+  try {
+    const remoteVersion = await fetchPublishedPackedVersion();
+    if (!remoteVersion) return savePackedUpdateStatus({
+      ok: false, state: "unsupported", updateAvailable: false,
+      message: "This build has no packed update URL. Use the GitHub Releases page for downloads."
+    });
+    const installedVersion = chrome.runtime.getManifest().version;
+    const oldStatus = (await chrome.storage.local.get({ packedUpdateStatus: null })).packedUpdateStatus;
+    // A natively staged update can be applied in-place. Don't overwrite it with
+    // the manual download fallback found in update.xml.
+    if (oldStatus?.applyMode === "browser" && oldStatus?.updateAvailable && oldStatus.installedVersion === installedVersion) return oldStatus;
+    if (comparePackedVersions(remoteVersion, installedVersion) > 0) {
+      return savePackedUpdateStatus({
+        ok: true, state: "available", updateAvailable: true,
+        applyMode: "manual", remoteVersion,
+        message: `GitHub v${remoteVersion} is available, but your browser has not staged it. Get the release and install it manually.`
+      });
+    }
+    return savePackedUpdateStatus({
+      ok: true, state: "up-to-date", updateAvailable: false,
+      message: `No newer version on GitHub. Installed v${installedVersion}.`
+    });
+  } catch (error) {
+    return savePackedUpdateStatus({
+      ok: false, state: "error", updateAvailable: false,
+      message: `Could not check GitHub Pages updates: ${String(error?.message || error)}`
+    });
+  }
+}
+
+async function configureUpdateCheckAlarm(enabled) {
+  if (!chrome.alarms) return;
+  await chrome.alarms.clear(UPDATE_CHECK_ALARM);
+  if (enabled) chrome.alarms.create(UPDATE_CHECK_ALARM, {
+    delayInMinutes: UPDATE_CHECK_EVERY_MINUTES,
+    periodInMinutes: UPDATE_CHECK_EVERY_MINUTES
+  });
+}
+
 async function savePackedUpdateStatus(status) {
   const value = {
     ...(status || {}),
@@ -1021,84 +1087,64 @@ async function savePackedUpdateStatus(status) {
 
 async function requestPackedUpdateCheck() {
   const installedVersion = chrome.runtime.getManifest().version;
-  if (typeof chrome.runtime.requestUpdateCheck !== "function") {
-    return savePackedUpdateStatus({
-      ok: false,
-      state: "unsupported",
-      installedVersion,
-      message: "This browser does not expose packed extension update checks."
-    });
+  if (typeof chrome.runtime.requestUpdateCheck === "function") {
+    try {
+      const result = await chrome.runtime.requestUpdateCheck();
+      if (result?.status === "update_available") {
+        return savePackedUpdateStatus({
+          ok: true, state: "available", applyMode: "browser",
+          remoteVersion: result.version || null, updateAvailable: true,
+          message: `Packed update${result.version ? ` v${result.version}` : ""} is staged. Click Apply update to install it.`
+        });
+      }
+    } catch {}
   }
-
-  try {
-    const result = await chrome.runtime.requestUpdateCheck();
-    const status = result?.status || "no_update";
-    const remoteVersion = result?.version || null;
-
-    if (status === "update_available") {
-      return savePackedUpdateStatus({
-        ok: true,
-        state: "available",
-        installedVersion,
-        remoteVersion,
-        updateAvailable: true,
-        message: remoteVersion
-          ? `Packed update v${remoteVersion} is available from GitHub Releases.`
-          : "A packed update is available from GitHub Releases."
-      });
-    }
-
-    if (status === "throttled") {
-      return savePackedUpdateStatus({
-        ok: true,
-        state: "throttled",
-        installedVersion,
-        remoteVersion: null,
-        updateAvailable: false,
-        message: "The browser recently checked for updates and temporarily throttled another manual check."
-      });
-    }
-
-    return savePackedUpdateStatus({
-      ok: true,
-      state: "up-to-date",
-      installedVersion,
-      remoteVersion: null,
-      updateAvailable: false,
-      message: `No newer packed update is currently available. Installed v${installedVersion}.`
-    });
-  } catch (error) {
-    return savePackedUpdateStatus({
-      ok: false,
-      state: "error",
-      installedVersion,
-      updateAvailable: false,
-      error: String(error?.message || error),
-      message: `Could not ask the browser to check for a packed update: ${String(error?.message || error)}`
-    });
-  }
+  // Useful in Opera/Brave/unpacked builds where runtime.requestUpdateCheck may
+  // be unavailable, throttled, or ignores a self-hosted GitHub update URL.
+  return checkPublishedPackedRelease();
 }
 
-async function applyPackedUpdateIfEnabled(version = null) {
-  const data = await chrome.storage.local.get({ autoApplyPackedUpdates: false });
-  const enabled = Boolean(data.autoApplyPackedUpdates);
-
-  const status = await savePackedUpdateStatus({
+async function notePackedUpdateAvailable(version = null) {
+  return savePackedUpdateStatus({
     ok: true,
-    state: enabled ? "applying" : "available",
+    state: "available",
+    applyMode: "browser",
     remoteVersion: version || null,
     updateAvailable: true,
-    autoApplyEnabled: enabled,
-    message: enabled
-      ? `Packed update${version ? ` v${version}` : ""} is ready and Message Memory is reloading to apply it.`
-      : `Packed update${version ? ` v${version}` : ""} is ready. It will be applied when the browser next reloads the extension.`
+    message: `Packed update${version ? ` v${version}` : ""} is ready. Click Apply update to install it, or wait. Your browser may still install its own updates on restart.`
   });
+}
 
-  if (enabled) {
-    setTimeout(() => {
-      try { chrome.runtime.reload(); } catch {}
-    }, 250);
+async function applyPackedUpdateOnClick() {
+  const saved = (await chrome.storage.local.get({ packedUpdateStatus: null })).packedUpdateStatus;
+  const installedVersion = chrome.runtime.getManifest().version;
+  if (!saved?.updateAvailable || saved?.installedVersion !== installedVersion) {
+    return { ok: false, reason: "not-ready", message: "No packed update is currently ready. Turn on Check for updates first." };
   }
+  if (saved.applyMode === "manual") {
+    if (!/^\d+(\.\d+){0,3}$/.test(saved.remoteVersion || "")) {
+      return { ok: false, reason: "invalid-version", message: "The release version is invalid." };
+    }
+    const url = `${RELEASES_BASE}v${encodeURIComponent(saved.remoteVersion)}`;
+    try {
+      await chrome.tabs.create({ url });
+      return await savePackedUpdateStatus({
+        ...saved, state: "available", ok: true,
+        message: `Opened GitHub Release v${saved.remoteVersion}. Download/install the CRX manually in a browser that allows it, or use the unpacked ZIP. This did not install the update.`
+      });
+    } catch (error) {
+      return { ok: false, reason: "open-failed", message: String(error?.message || error) };
+    }
+  }
+  if (saved.applyMode !== "browser") {
+    return { ok: false, reason: "not-staged", message: "The browser has not staged this packed update yet." };
+  }
+  const status = await savePackedUpdateStatus({
+    ...saved, ok: true, state: "applying",
+    message: `Applying packed update${saved.remoteVersion ? ` v${saved.remoteVersion}` : ""}…`
+  });
+  // Only an explicit button press uses this path; never reload automatically.
+  setTimeout(() => { try { chrome.runtime.reload(); } catch {} }, 350);
   return status;
 }
 
@@ -1132,13 +1178,17 @@ chrome.runtime.onInstalled.addListener(async details => {
     });
   }
 
+  const prefs = await chrome.storage.local.get({ checkForUpdatesEnabled: false });
+  await configureUpdateCheckAlarm(Boolean(prefs.checkForUpdatesEnabled));
   await syncHookActionIcon();
   await getStorageHealth();
   reconnectOpenDiscordTabs();
 });
 
-chrome.runtime.onStartup.addListener(() => {
+chrome.runtime.onStartup.addListener(async () => {
   syncHookActionIcon();
+  const prefs = await chrome.storage.local.get({ checkForUpdatesEnabled: false });
+  await configureUpdateCheckAlarm(Boolean(prefs.checkForUpdatesEnabled));
   reconnectOpenDiscordTabs();
 });
 
@@ -1146,15 +1196,23 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
   if (changes.hookStatus) setHookActionIcon(changes.hookStatus.newValue || null);
 
-  if (changes.autoApplyPackedUpdates?.newValue === true) {
-    // One immediate check when the user opts in. Normal packed-extension update
-    // checks are still scheduled by the browser itself.
-    requestPackedUpdateCheck().catch(() => {});
+  if (changes.checkForUpdatesEnabled) {
+    const enabled = Boolean(changes.checkForUpdatesEnabled.newValue);
+    configureUpdateCheckAlarm(enabled).catch(() => {});
+    if (enabled) requestPackedUpdateCheck().catch(() => {});
   }
 });
 
 chrome.runtime.onUpdateAvailable?.addListener(details => {
-  applyPackedUpdateIfEnabled(details?.version || null).catch(() => {});
+  // Never reload here; show the pending version for the user's Apply button.
+  notePackedUpdateAvailable(details?.version || null).catch(() => {});
+});
+
+chrome.alarms?.onAlarm?.addListener(alarm => {
+  if (alarm?.name !== UPDATE_CHECK_ALARM) return;
+  chrome.storage.local.get({ checkForUpdatesEnabled: false }).then(prefs => {
+    if (prefs.checkForUpdatesEnabled) checkPublishedPackedRelease().catch(() => {});
+  }).catch(() => {});
 });
 
 // Service workers can be started for reasons other than install/startup (for
@@ -1200,6 +1258,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return playCustomNotificationSound({ force: Boolean(message.force) });
       case "DMH_CHECK_PACKED_UPDATE":
         return requestPackedUpdateCheck();
+      case "DMH_APPLY_PACKED_UPDATE":
+        return applyPackedUpdateOnClick();
       case "DMH_ENSURE_MAIN_HOOK": {
         const tabId = sender?.tab?.id;
         if (!tabId) return { ok: false, reason: "no-tab" };

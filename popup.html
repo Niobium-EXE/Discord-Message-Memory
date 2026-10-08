@@ -20,15 +20,23 @@
       <div class="setting-row">
         <span>
           <span class="setting-title-row">
-            <label for="autoApplyPackedUpdates">Apply packed updates immediately</label>
-            <span class="info-tip" tabindex="0" data-tip="Packed installs update from GitHub Releases through the browser. Off by default: the browser applies updates on its normal reload cycle. Turn this on to reload Message Memory as soon as a downloaded update is ready.">i</span>
+            <label for="checkForUpdatesEnabled">Check for updates</label>
+            <span class="info-tip" tabindex="0" data-tip="Off by default. When enabled, ask the browser to check for a newer packed GitHub Release. Updates are not immediately reloaded by Message Memory. Chromium may still update extensions during its normal browser lifecycle.">i</span>
           </span>
           <small id="packedUpdateStatus">Packed update channel ready.</small>
         </span>
-        <label class="switch-label" for="autoApplyPackedUpdates">
-          <input id="autoApplyPackedUpdates" type="checkbox">
+        <label class="switch-label" for="checkForUpdatesEnabled">
+          <input id="checkForUpdatesEnabled" type="checkbox">
           <span class="switch" aria-hidden="true"></span>
         </label>
+      </div>
+
+      <div class="packed-apply-row">
+        <div class="setting-title-row">
+          <strong>Apply packed updates</strong>
+          <span class="info-tip" tabindex="0" data-tip="Only click Apply update when an update is ready. On supported packed installations, this reloads Message Memory to apply the downloaded CRX. Unpacked installations cannot install a CRX this way. Existing local data stays under the same extension ID.">i</span>
+        </div>
+        <button id="applyPackedUpdate" class="packed-apply-button" type="button" disabled>Apply update</button>
       </div>
 
       <div class="setting-row">

@@ -8,14 +8,15 @@ const DEFAULTS = {
   notificationSoundEnabled: false,
   notificationSound: null,
   notificationSoundVolume: 1,
-  autoApplyPackedUpdates: false,
+  checkForUpdatesEnabled: false,
   packedUpdateStatus: null
 };
 
 const EXPORT_DB_NAME = "discord-message-memory";
 const rememberToggle = document.getElementById("rememberingEnabled");
 const showingToggle = document.getElementById("showingEnabled");
-const autoApplyPackedUpdatesToggle = document.getElementById("autoApplyPackedUpdates");
+const checkForUpdatesToggle = document.getElementById("checkForUpdatesEnabled");
+const applyPackedUpdateButton = document.getElementById("applyPackedUpdate");
 const packedUpdateStatus = document.getElementById("packedUpdateStatus");
 const quickCss = document.getElementById("quickCss");
 const cssStatus = document.getElementById("cssStatus");
@@ -95,38 +96,32 @@ function formatNumber(value) {
 }
 
 function renderPackedUpdateStatus(enabled, status) {
-  if (!autoApplyPackedUpdatesToggle || !packedUpdateStatus) return;
-  autoApplyPackedUpdatesToggle.checked = Boolean(enabled);
+  if (!checkForUpdatesToggle || !packedUpdateStatus) return;
+  checkForUpdatesToggle.checked = Boolean(enabled);
   packedUpdateStatus.classList.remove("update-ok", "update-warn", "update-error");
-
-  const installedVersion = status?.installedVersion || chrome.runtime.getManifest().version;
+  const installedVersion = chrome.runtime.getManifest().version;
+  const ready = Boolean(status?.updateAvailable && status?.installedVersion === installedVersion);
+  applyPackedUpdateButton.disabled = !ready || status?.state === "applying";
+  applyPackedUpdateButton.textContent = status?.state === "applying" ? "Applying…" : status?.applyMode === "manual" ? "Get update" : "Apply update";
   if (status?.state === "applying") {
     packedUpdateStatus.classList.add("update-warn");
-    packedUpdateStatus.textContent = status.message || `Applying packed update${status.remoteVersion ? ` v${status.remoteVersion}` : ""}…`;
-    return;
-  }
-  if (status?.state === "available" || status?.updateAvailable) {
+    packedUpdateStatus.textContent = "Applying packed update…";
+  } else if (ready) {
     packedUpdateStatus.classList.add("update-warn");
-    packedUpdateStatus.textContent = enabled
-      ? `Packed update${status.remoteVersion ? ` v${status.remoteVersion}` : ""} is ready and will be applied automatically.`
-      : `Packed update${status.remoteVersion ? ` v${status.remoteVersion}` : ""} is ready and will apply on the next browser/extension reload.`;
-    return;
-  }
-  if (status && status.ok === false) {
+    packedUpdateStatus.textContent = status.applyMode === "manual"
+      ? `GitHub v${status.remoteVersion || "new"} is available, but your browser has not staged it. Click Get update to open the manual release download.`
+      : `Packed update${status.remoteVersion ? ` v${status.remoteVersion}` : ""} ready. Click Apply update when you're ready. Browser-managed updates may still occur on restart.`;
+  } else if (status?.ok === false) {
     packedUpdateStatus.classList.add("update-error");
-    packedUpdateStatus.textContent = status.message || status.error || "The browser could not check the packed update channel.";
-    return;
+    packedUpdateStatus.textContent = status.message || status.error || "Packed update check failed.";
+  } else if (status?.state === "throttled") {
+    packedUpdateStatus.textContent = "The browser recently checked for updates. Try again later.";
+  } else {
+    packedUpdateStatus.classList.add("update-ok");
+    packedUpdateStatus.textContent = enabled
+      ? `Installed v${installedVersion} · update checks enabled. Apply updates using the button below.`
+      : `Installed v${installedVersion} · extension-initiated checks off. Browser-managed updates may still occur.`;
   }
-  if (status?.state === "throttled") {
-    packedUpdateStatus.classList.add("update-warn");
-    packedUpdateStatus.textContent = "The browser recently checked for updates and temporarily throttled another manual check.";
-    return;
-  }
-
-  packedUpdateStatus.classList.add("update-ok");
-  packedUpdateStatus.textContent = enabled
-    ? `Installed v${installedVersion} · downloaded GitHub Release updates will be applied immediately.`
-    : `Installed v${installedVersion} · packed updates use the browser's normal reload/update cycle.`;
 }
 
 function updateHookStatus(status) {
@@ -155,7 +150,7 @@ async function loadSettings() {
   const data = await chrome.storage.local.get(DEFAULTS);
   rememberToggle.checked = Boolean(data.rememberingEnabled);
   showingToggle.checked = Boolean(data.showingEnabled);
-  renderPackedUpdateStatus(Boolean(data.autoApplyPackedUpdates), data.packedUpdateStatus);
+  renderPackedUpdateStatus(Boolean(data.checkForUpdatesEnabled), data.packedUpdateStatus);
   quickCss.value = data.quickCss || "";
   applySidebarState(Boolean(data.sidebarCollapsed));
   updateHookStatus(data.hookStatus);
@@ -1527,7 +1522,7 @@ function renderExportHtml(chat, messages, threads, options, mediaMap, avatarMap)
   const portable = {
     format: "discord-message-memory-export",
     formatVersion: 1,
-    extensionVersion: "1.5.2",
+    extensionVersion: "1.5.3",
     exportedAt: exportedAtIso,
     chat: { ...chat },
     messages: messages.map(message => portableExportRecord(message, options)),
@@ -1784,13 +1779,30 @@ sidebarToggle.addEventListener("click", async () => {
   await chrome.storage.local.set({ sidebarCollapsed: collapsed });
 });
 
-autoApplyPackedUpdatesToggle.addEventListener("change", async () => {
-  const enabled = autoApplyPackedUpdatesToggle.checked;
-  await chrome.storage.local.set({ autoApplyPackedUpdates: enabled });
+checkForUpdatesToggle.addEventListener("change", async () => {
+  const enabled = checkForUpdatesToggle.checked;
+  await chrome.storage.local.set({ checkForUpdatesEnabled: enabled });
   const data = await chrome.storage.local.get(DEFAULTS);
   renderPackedUpdateStatus(enabled, data.packedUpdateStatus);
-  if (enabled) {
-    sendBackground({ type: "DMH_CHECK_PACKED_UPDATE" }).catch(() => {});
+});
+
+applyPackedUpdateButton.addEventListener("click", async () => {
+  applyPackedUpdateButton.disabled = true;
+  applyPackedUpdateButton.textContent = "Applying…";
+  try {
+    const result = await sendBackground({ type: "DMH_APPLY_PACKED_UPDATE" });
+    if (result?.ok && result?.applyMode === "manual") {
+      renderPackedUpdateStatus(checkForUpdatesToggle.checked, result);
+      packedUpdateStatus.textContent = "Opened GitHub Release. Install the download manually; this button did not install it.";
+    } else if (!result?.ok) {
+      const data = await chrome.storage.local.get(DEFAULTS);
+      renderPackedUpdateStatus(Boolean(data.checkForUpdatesEnabled), data.packedUpdateStatus);
+      packedUpdateStatus.classList.add("update-error");
+      packedUpdateStatus.textContent = result?.message || result?.error || "No update is ready yet.";
+    }
+  } catch (error) {
+    packedUpdateStatus.classList.add("update-error");
+    packedUpdateStatus.textContent = String(error?.message || error);
   }
 });
 
@@ -1922,9 +1934,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.hookStatus) updateHookStatus(changes.hookStatus.newValue);
   if (changes.rememberingEnabled) rememberToggle.checked = Boolean(changes.rememberingEnabled.newValue);
   if (changes.showingEnabled) showingToggle.checked = Boolean(changes.showingEnabled.newValue);
-  if (changes.autoApplyPackedUpdates || changes.packedUpdateStatus) {
+  if (changes.checkForUpdatesEnabled || changes.packedUpdateStatus) {
     chrome.storage.local.get(DEFAULTS).then(data => {
-      renderPackedUpdateStatus(Boolean(data.autoApplyPackedUpdates), data.packedUpdateStatus);
+      renderPackedUpdateStatus(Boolean(data.checkForUpdatesEnabled), data.packedUpdateStatus);
     }).catch(() => {});
   }
   if (changes.sidebarCollapsed) applySidebarState(Boolean(changes.sidebarCollapsed.newValue));

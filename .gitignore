@@ -1,0 +1,7 @@
+# Keep private signing keys and local build output out of GitHub.
+*.pem
+/dist/
+/build/
+__pycache__/
+*.pyc
+.venv/
