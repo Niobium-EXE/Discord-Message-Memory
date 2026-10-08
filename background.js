@@ -443,7 +443,7 @@ async function upsertMessage(incoming, eventType = "MESSAGE_CREATE") {
   // still pending. The confirmed MESSAGE_CREATE may later arrive under a different
   // snowflake id. Reconcile by nonce so that slow sends become one stored message,
   // not a temporary copy plus a confirmed copy.
-  const aliases = eventType === "MESSAGE_CREATE" ? await findOutgoingAliases(store, incoming, key) : [];
+  const aliases = (eventType === "MESSAGE_CREATE" || eventType === "MESSAGE_SNAPSHOT") ? await findOutgoingAliases(store, incoming, key) : [];
   let aliasBase = null;
   for (const alias of aliases) aliasBase = shallowDefinedMerge(aliasBase, alias);
   const base = shallowDefinedMerge(aliasBase, old);

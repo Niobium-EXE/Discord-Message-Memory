@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const CONTENT_INSTANCE_VERSION = "1.4.1";
+  const CONTENT_INSTANCE_VERSION = "1.4.2";
   if (globalThis.__DMH_CONTENT_INSTANCE_VERSION__ === CONTENT_INSTANCE_VERSION) return;
   globalThis.__DMH_CONTENT_INSTANCE_VERSION__ = CONTENT_INSTANCE_VERSION;
 
@@ -28,6 +28,19 @@
   let lastHookStatusReceivedAt = 0;
   let ensureMainHookTimer = null;
 
+  // Slow history walker used by the popup. It intentionally lives in the
+  // content script so it keeps running after the popup closes. As older rows
+  // enter Discord's virtualized viewport, the normal scan/snapshot path repairs
+  // old optimistic outgoing duplicates and refreshes stored history.
+  let historyAutoScrollActive = false;
+  let historyAutoScrollTimer = null;
+  let historyAutoScrollChannelId = null;
+  let historyAutoScrollScroller = null;
+  let historyAutoScrollTopStall = 0;
+  let historyAutoScrollLastHeight = 0;
+  let historyAutoScrollLastTop = null;
+  let historyAutoScrollLastScanAt = 0;
+
   const mediaObjectUrls = new Map();
   const mediaLoadPromises = new Map();
 
@@ -51,6 +64,9 @@
     if (routeTimer) clearInterval(routeTimer);
     if (hookHeartbeatTimer) clearInterval(hookHeartbeatTimer);
     if (ensureMainHookTimer) clearTimeout(ensureMainHookTimer);
+    if (historyAutoScrollTimer) clearTimeout(historyAutoScrollTimer);
+    historyAutoScrollActive = false;
+    historyAutoScrollTimer = null;
     refreshTimer = scanTimer = routeTimer = hookHeartbeatTimer = ensureMainHookTimer = null;
     return true;
   }
@@ -1079,9 +1095,150 @@
     }, 80);
   }
 
+  function findHistoryScrollContainer() {
+    const channelId = parseCurrentChannelId();
+    if (!channelId) return null;
+    const row = document.querySelector(`li[id^="chat-messages-${channelId}-"]`) || document.querySelector('li[id^="chat-messages-"]');
+    let node = row?.parentElement || null;
+    while (node && node !== document.documentElement && node !== document.body) {
+      try {
+        const style = getComputedStyle(node);
+        if ((style.overflowY === "auto" || style.overflowY === "scroll") && node.scrollHeight > node.clientHeight + 80) return node;
+      } catch {}
+      node = node.parentElement;
+    }
+
+    // Fallback for Discord builds where the visible message row is wrapped in a
+    // portal/virtual-list structure that makes the scrollable ancestor harder to
+    // identify by walking upward.
+    const candidates = document.querySelectorAll('[class*="scroller"], [data-list-id="chat-messages"]');
+    let best = null;
+    for (const candidate of candidates) {
+      if (!(candidate instanceof HTMLElement)) continue;
+      try {
+        const style = getComputedStyle(candidate);
+        if (style.overflowY !== "auto" && style.overflowY !== "scroll") continue;
+        if (candidate.scrollHeight <= candidate.clientHeight + 80) continue;
+        if (row && !candidate.contains(row)) continue;
+        if (!best || candidate.scrollHeight > best.scrollHeight) best = candidate;
+      } catch {}
+    }
+    return best;
+  }
+
+  function autoScrollStatus() {
+    return {
+      ok: true,
+      active: historyAutoScrollActive,
+      channelId: historyAutoScrollChannelId,
+      atTop: Boolean(historyAutoScrollActive && historyAutoScrollScroller && historyAutoScrollScroller.scrollTop <= 2)
+    };
+  }
+
+  function stopHistoryAutoScroll(reason = "stopped") {
+    historyAutoScrollActive = false;
+    historyAutoScrollChannelId = null;
+    historyAutoScrollScroller = null;
+    historyAutoScrollTopStall = 0;
+    historyAutoScrollLastHeight = 0;
+    historyAutoScrollLastTop = null;
+    if (historyAutoScrollTimer) clearTimeout(historyAutoScrollTimer);
+    historyAutoScrollTimer = null;
+    safeStorageSet({
+      historyAutoScrollStatus: { active: false, reason, updatedAt: Date.now() }
+    }).catch(() => {});
+    return { ...autoScrollStatus(), reason };
+  }
+
+  function scheduleHistoryAutoScrollTick(delay = 420) {
+    if (!historyAutoScrollActive) return;
+    if (historyAutoScrollTimer) clearTimeout(historyAutoScrollTimer);
+    historyAutoScrollTimer = setTimeout(historyAutoScrollTick, delay);
+  }
+
+  function historyAutoScrollTick() {
+    historyAutoScrollTimer = null;
+    if (!historyAutoScrollActive) return;
+
+    const channelId = parseCurrentChannelId();
+    if (!channelId || channelId !== historyAutoScrollChannelId) {
+      stopHistoryAutoScroll("channel-changed");
+      return;
+    }
+
+    let scroller = historyAutoScrollScroller;
+    if (!scroller?.isConnected) scroller = null;
+    if (!scroller) scroller = findHistoryScrollContainer();
+    historyAutoScrollScroller = scroller;
+
+    if (!scroller) {
+      historyAutoScrollTopStall += 1;
+      if (historyAutoScrollTopStall >= 20) {
+        stopHistoryAutoScroll("no-scroller");
+        return;
+      }
+      scheduleHistoryAutoScrollTick(600);
+      return;
+    }
+
+    const before = Number(scroller.scrollTop || 0);
+    const beforeHeight = Number(scroller.scrollHeight || 0);
+    // Roughly 80-90 px/sec while the tab is foregrounded. Chromium may throttle
+    // background tabs, but the walker remains active and resumes automatically.
+    scroller.scrollTop = Math.max(0, before - 36);
+    const after = Number(scroller.scrollTop || 0);
+
+    const now = Date.now();
+    if (now - historyAutoScrollLastScanAt > 1100) {
+      historyAutoScrollLastScanAt = now;
+      scanVisibleMessages();
+    }
+
+    const heightChanged = Math.abs(beforeHeight - historyAutoScrollLastHeight) > 2;
+    const topMoved = historyAutoScrollLastTop == null || Math.abs(after - historyAutoScrollLastTop) > 1;
+    if (after <= 2 && !heightChanged && !topMoved) historyAutoScrollTopStall += 1;
+    else historyAutoScrollTopStall = 0;
+
+    historyAutoScrollLastHeight = Number(scroller.scrollHeight || beforeHeight);
+    historyAutoScrollLastTop = after;
+
+    // Stay parked at the top for about 10 seconds to give Discord time to load an
+    // older virtualized page. If neither the height nor position changes, history
+    // is exhausted and we can stop automatically.
+    if (historyAutoScrollTopStall >= 24) {
+      scanVisibleMessages();
+      stopHistoryAutoScroll("reached-top");
+      return;
+    }
+
+    scheduleHistoryAutoScrollTick(after <= 2 ? 500 : 420);
+  }
+
+  function startHistoryAutoScroll() {
+    const channelId = parseCurrentChannelId();
+    if (!channelId) return { ok: false, active: false, error: "Open a Discord chat first." };
+    const scroller = findHistoryScrollContainer();
+    if (!scroller) return { ok: false, active: false, error: "Could not find Discord's message scroller yet." };
+
+    historyAutoScrollActive = true;
+    historyAutoScrollChannelId = channelId;
+    historyAutoScrollScroller = scroller;
+    historyAutoScrollTopStall = 0;
+    historyAutoScrollLastHeight = Number(scroller.scrollHeight || 0);
+    historyAutoScrollLastTop = Number(scroller.scrollTop || 0);
+    historyAutoScrollLastScanAt = 0;
+    safeStorageSet({
+      historyAutoScrollStatus: { active: true, channelId, updatedAt: Date.now() }
+    }).catch(() => {});
+    scanVisibleMessages();
+    scheduleHistoryAutoScrollTick(160);
+    return autoScrollStatus();
+  }
+
   function onRouteChanged() {
     const nextChannel = parseCurrentChannelId();
     const changed = nextChannel !== currentChannelId;
+    if (changed && historyAutoScrollActive) stopHistoryAutoScroll("channel-changed");
     currentChannelId = nextChannel;
     if (changed) {
       clearDecorations();
@@ -1207,6 +1364,23 @@
       });
     }
   });
+
+  if (extensionContextAlive()) try { chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type === "DMH_GET_AUTO_SCROLL_STATUS") {
+      sendResponse(autoScrollStatus());
+      return false;
+    }
+    if (message?.type === "DMH_TOGGLE_AUTO_SCROLL") {
+      const result = historyAutoScrollActive ? stopHistoryAutoScroll("user") : startHistoryAutoScroll();
+      sendResponse(result);
+      return false;
+    }
+    if (message?.type === "DMH_STOP_AUTO_SCROLL") {
+      sendResponse(stopHistoryAutoScroll("user"));
+      return false;
+    }
+    return false;
+  }); } catch (error) { invalidateExtensionContext(error); }
 
   if (extensionContextAlive()) try { chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
