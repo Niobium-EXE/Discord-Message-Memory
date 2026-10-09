@@ -2,7 +2,8 @@ const DEFAULTS = {
   rememberingEnabled: true,
   showingEnabled: true,
   checkForUpdatesEnabled: false,
-  packedUpdateStatus: null
+  packedUpdateStatus: null,
+  historyAutoScrollSpeed: 90
 };
 
 const remember = document.getElementById("rememberingEnabled");
@@ -14,6 +15,15 @@ const statusDot = document.getElementById("statusDot");
 const statusText = document.getElementById("statusText");
 const autoScrollButton = document.getElementById("autoScrollHistory");
 const autoScrollStatus = document.getElementById("autoScrollStatus");
+const historyAutoScrollSpeed = document.getElementById("historyAutoScrollSpeed");
+const historyAutoScrollSpeedValue = document.getElementById("historyAutoScrollSpeedValue");
+
+function displayHistoryAutoScrollSpeed(raw) {
+  const value = Math.min(300, Math.max(20, Math.round((Number(raw) || 90) / 10) * 10));
+  historyAutoScrollSpeed.value = String(value);
+  historyAutoScrollSpeedValue.textContent = `${value} px/s`;
+}
+
 
 
 function renderPackedUpdateStatus(enabled, status) {
@@ -81,6 +91,7 @@ async function init() {
   remember.checked = Boolean(data.rememberingEnabled);
   showing.checked = Boolean(data.showingEnabled);
   renderPackedUpdateStatus(Boolean(data.checkForUpdatesEnabled), data.packedUpdateStatus);
+  displayHistoryAutoScrollSpeed(data.historyAutoScrollSpeed);
 
   const status = data.hookStatus;
   const fresh = status?.updatedAt && Date.now() - status.updatedAt < 90_000;
@@ -140,6 +151,11 @@ showing.addEventListener("change", () => {
   chrome.storage.local.set({ showingEnabled: showing.checked });
 });
 
+historyAutoScrollSpeed.addEventListener("input", () => {
+  displayHistoryAutoScrollSpeed(historyAutoScrollSpeed.value);
+  chrome.storage.local.set({ historyAutoScrollSpeed: Number(historyAutoScrollSpeed.value) });
+});
+
 autoScrollButton.addEventListener("click", async () => {
   autoScrollButton.disabled = true;
   try {
@@ -164,6 +180,7 @@ document.getElementById("openSettings").addEventListener("click", () => {
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
+  if (changes.historyAutoScrollSpeed) displayHistoryAutoScrollSpeed(changes.historyAutoScrollSpeed.newValue);
   if (changes.checkForUpdatesEnabled || changes.packedUpdateStatus) {
     chrome.storage.local.get(DEFAULTS).then(data => {
       renderPackedUpdateStatus(Boolean(data.checkForUpdatesEnabled), data.packedUpdateStatus);

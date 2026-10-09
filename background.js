@@ -1066,6 +1066,30 @@ async function checkPublishedPackedRelease() {
   }
 }
 
+// A normal update keeps chrome.storage.local when the extension ID is stable.
+// Also mirror this tiny preference to sync storage so it can be recovered if a
+// browser upgrade leaves the local key missing. Message/chat data remains local.
+async function mirrorUpdateCheckPreference(enabled) {
+  try {
+    await chrome.storage.sync.set({ checkForUpdatesEnabled: Boolean(enabled) });
+  } catch {
+    // Opera GX and some Chromium profiles may disable sync. Local storage is
+    // still the authoritative copy and must continue to work independently.
+  }
+}
+
+async function recoverUpdateCheckPreferenceOnUpgrade(current, reason) {
+  if (typeof current.checkForUpdatesEnabled === "boolean") return current;
+  if (reason !== "update") return current;
+  try {
+    const synced = await chrome.storage.sync.get("checkForUpdatesEnabled");
+    if (typeof synced.checkForUpdatesEnabled === "boolean") {
+      return { ...current, checkForUpdatesEnabled: synced.checkForUpdatesEnabled };
+    }
+  } catch {}
+  return current;
+}
+
 async function configureUpdateCheckAlarm(enabled) {
   if (!chrome.alarms) return;
   await chrome.alarms.clear(UPDATE_CHECK_ALARM);
@@ -1149,12 +1173,17 @@ async function applyPackedUpdateOnClick() {
 }
 
 chrome.runtime.onInstalled.addListener(async details => {
-  const current = await chrome.storage.local.get(Object.keys(DEFAULT_SETTINGS));
+  // Never reset an existing choice when the extension is upgraded. In case the
+  // local update-check key is missing, try the mirrored preference before
+  // applying the off-by-default value for a genuinely new installation.
+  const savedLocalSettings = await chrome.storage.local.get(Object.keys(DEFAULT_SETTINGS));
+  const current = await recoverUpdateCheckPreferenceOnUpgrade(savedLocalSettings, details?.reason);
   const missing = {};
   for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
-    if (current[key] === undefined) missing[key] = value;
+    if (savedLocalSettings[key] === undefined) missing[key] = current[key] === undefined ? value : current[key];
   }
   if (Object.keys(missing).length) await chrome.storage.local.set(missing);
+  await mirrorUpdateCheckPreference(Boolean(current.checkForUpdatesEnabled));
 
   const installedVersion = chrome.runtime.getManifest().version;
   if (details?.reason === "update") {
@@ -1189,6 +1218,7 @@ chrome.runtime.onStartup.addListener(async () => {
   syncHookActionIcon();
   const prefs = await chrome.storage.local.get({ checkForUpdatesEnabled: false });
   await configureUpdateCheckAlarm(Boolean(prefs.checkForUpdatesEnabled));
+  await mirrorUpdateCheckPreference(Boolean(prefs.checkForUpdatesEnabled));
   reconnectOpenDiscordTabs();
 });
 
@@ -1198,6 +1228,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
   if (changes.checkForUpdatesEnabled) {
     const enabled = Boolean(changes.checkForUpdatesEnabled.newValue);
+    mirrorUpdateCheckPreference(enabled).catch(() => {});
     configureUpdateCheckAlarm(enabled).catch(() => {});
     if (enabled) requestPackedUpdateCheck().catch(() => {});
   }

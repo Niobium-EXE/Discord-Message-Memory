@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const CONTENT_INSTANCE_VERSION = "1.5.4";
+  const CONTENT_INSTANCE_VERSION = "1.5.6";
   if (globalThis.__DMH_CONTENT_INSTANCE_VERSION__ === CONTENT_INSTANCE_VERSION) return;
   globalThis.__DMH_CONTENT_INSTANCE_VERSION__ = CONTENT_INSTANCE_VERSION;
 
@@ -11,7 +11,8 @@
     rememberingEnabled: true,
     showingEnabled: true,
     quickCss: "",
-    notificationSoundEnabled: false
+    notificationSoundEnabled: false,
+    historyAutoScrollSpeed: 90
   };
 
   let settings = { ...SETTINGS_DEFAULTS };
@@ -40,6 +41,11 @@
   let historyAutoScrollLastHeight = 0;
   let historyAutoScrollLastTop = null;
   let historyAutoScrollLastScanAt = 0;
+  const AUTO_SCROLL_TICK_MS = 420;
+  function currentAutoScrollSpeed() {
+    const speed = Number(settings.historyAutoScrollSpeed);
+    return Number.isFinite(speed) ? Math.max(20, Math.min(300, speed)) : 90;
+  }
 
   const mediaObjectUrls = new Map();
   const mediaLoadPromises = new Map();
@@ -1131,7 +1137,8 @@
       ok: true,
       active: historyAutoScrollActive,
       channelId: historyAutoScrollChannelId,
-      atTop: Boolean(historyAutoScrollActive && historyAutoScrollScroller && historyAutoScrollScroller.scrollTop <= 2)
+      atTop: Boolean(historyAutoScrollActive && historyAutoScrollScroller && historyAutoScrollScroller.scrollTop <= 2),
+      speed: currentAutoScrollSpeed()
     };
   }
 
@@ -1183,13 +1190,15 @@
 
     const before = Number(scroller.scrollTop || 0);
     const beforeHeight = Number(scroller.scrollHeight || 0);
-    // Roughly 80-90 px/sec while the tab is foregrounded. Chromium may throttle
-    // background tabs, but the walker remains active and resumes automatically.
-    scroller.scrollTop = Math.max(0, before - 36);
+    // Speed is stored in px/second; change it live from the popup slider.
+    // Background Chromium tabs may throttle timers; we deliberately avoid
+    // huge catch-up jumps so virtualized Discord messages aren't skipped.
+    const step = Math.max(1, Math.round(currentAutoScrollSpeed() * AUTO_SCROLL_TICK_MS / 1000));
+    scroller.scrollTop = Math.max(0, before - step);
     const after = Number(scroller.scrollTop || 0);
 
     const now = Date.now();
-    if (now - historyAutoScrollLastScanAt > 1100) {
+    if (now - historyAutoScrollLastScanAt > (currentAutoScrollSpeed() >= 180 ? 400 : 850)) {
       historyAutoScrollLastScanAt = now;
       scanVisibleMessages();
     }
@@ -1211,7 +1220,7 @@
       return;
     }
 
-    scheduleHistoryAutoScrollTick(after <= 2 ? 500 : 420);
+    scheduleHistoryAutoScrollTick(after <= 2 ? 500 : AUTO_SCROLL_TICK_MS);
   }
 
   function startHistoryAutoScroll() {

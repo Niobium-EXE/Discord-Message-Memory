@@ -133,6 +133,11 @@ input:focus-visible + .switch { outline: 2px solid #aab3ff; outline-offset: 2px;
   border-radius: 8px;
   background: #181b21;
 }
+.history-speed-row { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 6px; align-items: center; padding-top: 9px; border-top: 1px solid #2c313a; }
+.history-speed-row label { font-size: 11px; font-weight: 700; color: #d8dce4; }
+.history-speed-value { font-size: 10px; color: #aeb9c9; font-variant-numeric: tabular-nums; }
+.history-speed-row input[type="range"] { grid-column: 1 / -1; width: 100%; min-width: 0; margin: 3px 0 0; accent-color: #7888e9; cursor: pointer; }
+.history-speed-ends { grid-column: 1 / -1; display: flex; justify-content: space-between; font-size: 9px; color: #868f9e; }
 .history-scroll-copy { min-width: 0; }
 .history-scroll-copy strong {
   display: block;
@@ -253,3 +258,33 @@ input:focus-visible + .switch { outline: 2px solid #aab3ff; outline-offset: 2px;
 .packed-apply-button:disabled { opacity: .48; cursor: default; }
 
 .packed-apply-row + .setting-row { border-top: 1px solid #292d35; }
+
+/* v1.5.6 — visibly green ON / red OFF toggles. */
+.switch-label { width: 56px; height: 26px; flex: 0 0 56px; }
+.switch {
+  display: block;
+  width: 56px;
+  height: 26px;
+  border: 1px solid #e07980;
+  border-radius: 999px;
+  background: #b93c4a;
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+.switch::before {
+  content: "OFF";
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  transform: translateY(-50%);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .025em;
+  line-height: 1;
+}
+.switch::after { width: 18px; height: 18px; top: 3px; left: 3px; box-shadow: 0 1px 3px rgba(0,0,0,.26); }
+.switch-label input:checked + .switch { background: #218658; border-color: #54c78a; }
+.switch-label input:checked + .switch::before { content: "ON"; left: 8px; right: auto; }
+.switch-label input:checked + .switch::after { transform: translateX(30px); }
+.switch-label input:focus-visible + .switch { outline: 2px solid #bfd2ff; outline-offset: 3px; }
+

@@ -624,3 +624,34 @@ input:focus-visible + .switch { outline: 2px solid #aab3ff; outline-offset: 2px;
 .saved-heading-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; align-items:center; gap:10px; }
 .saved-heading-actions .setting-title-row { display:inline-flex; align-items:center; gap:5px; }
 @media(max-width:700px) { .saved-heading-actions { justify-content:flex-start; width:100%; } }
+
+/* v1.5.6 — visibly green ON / red OFF toggles. */
+.toggle-row { grid-template-columns: minmax(0, 1fr) 56px; }
+.switch-label { width: 56px; height: 26px; }
+.switch {
+  display: block;
+  width: 56px;
+  height: 26px;
+  border: 1px solid #e07980;
+  border-radius: 999px;
+  background: #b93c4a;
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+.switch::before {
+  content: "OFF";
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  transform: translateY(-50%);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .025em;
+  line-height: 1;
+}
+.switch::after { width: 18px; height: 18px; top: 3px; left: 3px; box-shadow: 0 1px 3px rgba(0,0,0,.26); }
+.switch-label input:checked + .switch { background: #218658; border-color: #54c78a; }
+.switch-label input:checked + .switch::before { content: "ON"; left: 8px; right: auto; }
+.switch-label input:checked + .switch::after { transform: translateX(30px); }
+.switch-label input:focus-visible + .switch { outline: 2px solid #bfd2ff; outline-offset: 3px; }
+

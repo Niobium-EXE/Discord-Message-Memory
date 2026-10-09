@@ -1546,7 +1546,7 @@ function renderExportHtml(chat, messages, threads, options, mediaMap, avatarMap)
   const portable = {
     format: "discord-message-memory-export",
     formatVersion: 1,
-    extensionVersion: "1.5.4",
+    extensionVersion: "1.5.6",
     exportedAt: exportedAtIso,
     chat: { ...chat },
     messages: messages.map(message => portableExportRecord(message, options)),
@@ -1807,7 +1807,29 @@ async function runExportAll() {
   resetExportProgress();
   const options = getExportOptions();
   let missingTotal = 0;
+  let zip = null;
+  let pendingWritable = null;
   try {
+    const date = new Date().toISOString().slice(0, 10);
+    const zipFilename = `Discord Message Memory - All chats - ${date}.zip`;
+    // Open the save dialog BEFORE the first await; browsers require a direct
+    // user gesture for showSaveFilePicker. Stream the ZIP to disk when possible.
+    if (typeof window.showSaveFilePicker === "function") {
+      try {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: zipFilename,
+          types: [{ description: "ZIP archive", accept: { "application/zip": [".zip"] } }]
+        });
+        pendingWritable = await handle.createWritable();
+      } catch (error) {
+        if (error?.name === "AbortError") {
+          setExportProgress(0, 1, "Export cancelled; nothing was changed.");
+          return;
+        }
+        // Unsupported picker / browser policy: regular download fallback.
+      }
+    }
+    zip = new DmhZipWriter({ writable: pendingWritable });
     setExportProgress(0, 1, "Finding saved chats…");
     // Use exact counts here: the fast saved-chat list can have stale counts or
     // miss orphan records. Fetching everything also ignores the UI search box.
@@ -1816,10 +1838,8 @@ async function runExportAll() {
       .filter(chat => chat?.channelId && Number(chat.messageCount || 0) > 0)
       .sort((a, b) => displayChatName(a).localeCompare(displayChatName(b)) || String(a.channelId).localeCompare(String(b.channelId)));
     if (!exportChats.length) throw new Error("There are no saved chat messages to export.");
-    const zip = new DmhZipWriter();
     const channelCache = options.threads ? await getSavedChannels() : null;
     const missingByChat = [];
-    const date = new Date().toISOString().slice(0, 10);
     for (let index = 0; index < exportChats.length; index += 1) {
       const chat = exportChats[index];
       bulkExportProgress = { complete: index, chatIndex: index + 1, chatTotal: exportChats.length, chatName: displayChatName(chat) };
@@ -1840,14 +1860,16 @@ async function runExportAll() {
     }
     bulkExportProgress = null;
     setExportProgress(0, 1, "Finishing ZIP…");
-    const archive = zip.finish();
-    downloadExportBlob(archive, `Discord Message Memory - All chats - ${date}.zip`);
-    setExportProgress(1, 1, `ZIP ready · ${exportChats.length} chats · ${formatBytes(archive.size)}`);
+    const archive = await zip.finish();
+    if (archive.blob) downloadExportBlob(archive.blob, zipFilename);
+    setExportProgress(1, 1, `ZIP ready · ${exportChats.length} chats · ${formatBytes(Number(archive.size))}${archive.streamed ? " · saved to disk" : ""}`);
     if (missingTotal) {
       exportWarning.hidden = false;
       exportWarning.textContent = `${missingTotal} attachment(s) were not cached across ${missingByChat.length} chat(s). Available Discord links were preserved.`;
     }
   } catch (error) {
+    // Abort the writable file so the browser does not publish a partial ZIP.
+    if (zip) await zip.abort();
     exportWarning.hidden = false;
     exportWarning.textContent = `Bulk export failed: ${String(error?.message || error)}. No incomplete ZIP was downloaded. Saved chats were not changed.`;
   } finally {
